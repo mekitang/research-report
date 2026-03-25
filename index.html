@@ -579,10 +579,16 @@ function SaveModal({onClose,data,user,onLoad,reportId,onReportIdSet}){
     setLoading(true);
     try{
       await waitFb();
-      const {collection,query,where,orderBy,getDocs}=window._fbFns;
-      const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),orderBy("updatedAt","desc"));
+      const {collection,query,where,getDocs}=window._fbFns;
+      const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid));
       const snap=await getDocs(q);
-      setSaves(snap.docs.map(d=>({id:d.id,...d.data()})));
+      const docs=snap.docs.map(d=>({id:d.id,...d.data()}));
+      docs.sort((a,b)=>{
+        const ta=a.updatedAt?.toMillis?.()|| new Date(a.updatedAt||0).getTime();
+        const tb=b.updatedAt?.toMillis?.()|| new Date(b.updatedAt||0).getTime();
+        return tb-ta;
+      });
+      setSaves(docs);
     }catch(e){console.error(e);}
     setLoading(false);
   };
@@ -658,9 +664,9 @@ function AdminScreen({user,onLogout}){
     setLoading(true);
     try{
       await waitFb();
-      const {collection,getDocs,query,orderBy}=window._fbFns;
+      const {collection,getDocs,query}=window._fbFns;
       const usSnap=await getDocs(collection(window._fbDb,"users"));
-      const rpSnap=await getDocs(query(collection(window._fbDb,"reports"),orderBy("updatedAt","desc")));
+      const rpSnap=await getDocs(collection(window._fbDb,"reports"));
       const uList=usSnap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.role!=="admin");
       const rList=rpSnap.docs.map(d=>({id:d.id,...d.data()}));
       setUsers(uList);
@@ -1006,10 +1012,17 @@ function MyReportsModal({user,onClose,onLoad}){
     (async()=>{
       try{
         await waitFb();
-        const {collection,query,where,orderBy,getDocs}=window._fbFns;
-        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),orderBy("updatedAt","desc"));
+        const {collection,query,where,getDocs}=window._fbFns;
+        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid));
         const snap=await getDocs(q);
-        setReports(snap.docs.map(d=>({id:d.id,...d.data()})));
+        const docs=snap.docs.map(d=>({id:d.id,...d.data()}));
+        // 클라이언트에서 최신순 정렬
+        docs.sort((a,b)=>{
+          const ta=a.updatedAt?.toMillis?.()|| new Date(a.updatedAt||0).getTime();
+          const tb=b.updatedAt?.toMillis?.()|| new Date(b.updatedAt||0).getTime();
+          return tb-ta;
+        });
+        setReports(docs);
       }catch(e){console.error(e);}
       setLoading(false);
     })();
@@ -1735,6 +1748,84 @@ JSON:{"motivation":"내용","process":"내용","skills":"내용","learned":"내�
   </div>;
 }
 
+// ─── Report Home Screen (보고서 홈) ───────────────────────────────────────
+function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel}){
+  const [reports,setReports]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        await waitFb();
+        const {collection,query,where,getDocs}=window._fbFns;
+        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid));
+        const snap=await getDocs(q);
+        const docs=snap.docs.map(d=>({id:d.id,...d.data()}));
+        docs.sort((a,b)=>{
+          const ta=a.updatedAt?.toMillis?.()|| new Date(a.updatedAt||0).getTime();
+          const tb=b.updatedAt?.toMillis?.()|| new Date(b.updatedAt||0).getTime();
+          return tb-ta;
+        });
+        setReports(docs);
+      }catch(e){console.error(e);}
+      setLoading(false);
+    })();
+  },[]);
+
+  return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40}}>
+    <div style={{width:"100%",maxWidth:640,margin:"0 auto"}}>
+      {/* 헤더 */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:28}}>
+        <div>
+          <div className="login-logo" style={{textAlign:"left",marginBottom:4}}>STUDY<span>.</span>AI</div>
+          <div style={{fontSize:18,fontWeight:600,color:"var(--text)"}}>{user.name}님 환영합니다!</div>
+          <div style={{fontSize:13,color:"var(--text3)",marginTop:2}}>{user.school} {user.grade}</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div className="coin-badge">🪙 {user.coins||0}</div>
+          <button className="btn btn-ghost" style={{fontSize:11}} onClick={onLogout}>로그아웃</button>
+        </div>
+      </div>
+
+      {/* 새 보고서 시작 */}
+      <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"24px",marginBottom:20,textAlign:"center"}}>
+        <div style={{fontSize:28,marginBottom:8}}>✍️</div>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:6}}>새 탐구보고서 작성</div>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>코인 1개를 사용하여 새 보고서를 시작합니다.</div>
+        <button className="btn btn-primary" style={{padding:"10px 32px"}} onClick={onNewReport} disabled={(user.coins||0)<=0}>
+          {(user.coins||0)<=0?"코인 부족 — 선생님께 요청하세요":"🪙 코인 1개 사용하여 시작"}
+        </button>
+      </div>
+
+      {/* 기존 보고서 목록 */}
+      <div className="sec-label">저장된 보고서 ({reports.length}개)</div>
+      {loading&&<AILoad msg="보고서 목록을 불러오는 중..."/>}
+      {!loading&&reports.length===0&&(
+        <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"32px",textAlign:"center",color:"var(--text3)",fontSize:13}}>
+          아직 저장된 보고서가 없습니다.<br/>새 보고서를 시작해보세요!
+        </div>
+      )}
+      {reports.map(r=>(
+        <div key={r.id} className="save-item" onClick={()=>onLoadReport(r.data, r.reportId||r.id)}
+          style={{cursor:"pointer",marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div className="save-item-title">{r.data?.selectedTopic||r.title||"주제 없음"}</div>
+              <div style={{fontSize:11,color:"var(--text3)",marginTop:3}}>
+                {r.data?.school||""} {r.data?.grade||""} {r.data?.name||""}
+              </div>
+            </div>
+            <div style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)",whiteSpace:"nowrap",marginLeft:12}}>
+              {r.updatedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+    {showCoin&&<CoinCheckModal coins={user.coins||0} onConfirm={onCoinConfirm} onCancel={onCoinCancel}/>}
+  </div>;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // ─── APP ROOT ──────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
@@ -1822,78 +1913,6 @@ function App(){
     onCoinConfirm={handleCoinConfirm}
     onCoinCancel={()=>setScreen("coin_check")}
   />;
-}
-
-// ─── Report Home Screen (보고서 홈) ───────────────────────────────────────
-function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel}){
-  const [reports,setReports]=useState([]);
-  const [loading,setLoading]=useState(true);
-
-  useEffect(()=>{
-    (async()=>{
-      try{
-        await waitFb();
-        const {collection,query,where,orderBy,getDocs}=window._fbFns;
-        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),orderBy("updatedAt","desc"));
-        const snap=await getDocs(q);
-        setReports(snap.docs.map(d=>({id:d.id,...d.data()})));
-      }catch(e){console.error(e);}
-      setLoading(false);
-    })();
-  },[]);
-
-  return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40}}>
-    <div style={{width:"100%",maxWidth:640,margin:"0 auto"}}>
-      {/* 헤더 */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:28}}>
-        <div>
-          <div className="login-logo" style={{textAlign:"left",marginBottom:4}}>STUDY<span>.</span>AI</div>
-          <div style={{fontSize:18,fontWeight:600,color:"var(--text)"}}>{user.name}님 환영합니다!</div>
-          <div style={{fontSize:13,color:"var(--text3)",marginTop:2}}>{user.school} {user.grade}</div>
-        </div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <div className="coin-badge">🪙 {user.coins||0}</div>
-          <button className="btn btn-ghost" style={{fontSize:11}} onClick={onLogout}>로그아웃</button>
-        </div>
-      </div>
-
-      {/* 새 보고서 시작 */}
-      <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"24px",marginBottom:20,textAlign:"center"}}>
-        <div style={{fontSize:28,marginBottom:8}}>✍️</div>
-        <div style={{fontSize:16,fontWeight:600,marginBottom:6}}>새 탐구보고서 작성</div>
-        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>코인 1개를 사용하여 새 보고서를 시작합니다.</div>
-        <button className="btn btn-primary" style={{padding:"10px 32px"}} onClick={onNewReport} disabled={(user.coins||0)<=0}>
-          {(user.coins||0)<=0?"코인 부족 — 선생님께 요청하세요":"🪙 코인 1개 사용하여 시작"}
-        </button>
-      </div>
-
-      {/* 기존 보고서 목록 */}
-      <div className="sec-label">저장된 보고서 ({reports.length}개)</div>
-      {loading&&<AILoad msg="보고서 목록을 불러오는 중..."/>}
-      {!loading&&reports.length===0&&(
-        <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"32px",textAlign:"center",color:"var(--text3)",fontSize:13}}>
-          아직 저장된 보고서가 없습니다.<br/>새 보고서를 시작해보세요!
-        </div>
-      )}
-      {reports.map(r=>(
-        <div key={r.id} className="save-item" onClick={()=>onLoadReport(r.data, r.reportId||r.id)}
-          style={{cursor:"pointer",marginBottom:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-            <div>
-              <div className="save-item-title">{r.data?.selectedTopic||r.title||"주제 없음"}</div>
-              <div style={{fontSize:11,color:"var(--text3)",marginTop:3}}>
-                {r.data?.school||""} {r.data?.grade||""} {r.data?.name||""}
-              </div>
-            </div>
-            <div style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)",whiteSpace:"nowrap",marginLeft:12}}>
-              {r.updatedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-    {showCoin&&<CoinCheckModal coins={user.coins||0} onConfirm={onCoinConfirm} onCancel={onCoinCancel}/>}
-  </div>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
