@@ -568,13 +568,12 @@ function CoinCheckModal({coins,onConfirm,onCancel}){
 // ════════════════════════════════════════════════════════════════════════════
 // ─── SAVE/LOAD MODAL ───────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
-function SaveModal({onClose,data,user,onLoad}){
+function SaveModal({onClose,data,user,onLoad,reportId,onReportIdSet}){
   const [saves,setSaves]=useState([]);
   const [loading,setLoading]=useState(false);
+  const [saveMsg,setSaveMsg]=useState("");
 
-  useEffect(()=>{
-    loadSaves();
-  },[]);
+  useEffect(()=>{ loadSaves(); },[]);
 
   const loadSaves=async()=>{
     setLoading(true);
@@ -589,35 +588,46 @@ function SaveModal({onClose,data,user,onLoad}){
   };
 
   const doSave=async()=>{
-    setLoading(true);
+    setLoading(true);setSaveMsg("");
     try{
       await waitFb();
-      const {collection,addDoc,serverTimestamp}=window._fbFns;
+      const {doc,setDoc,serverTimestamp}=window._fbFns;
+      // reportId가 있으면 같은 문서에 덮어쓰기, 없으면 새 ID 생성
+      const id=reportId||(user.uid+"_"+Date.now());
       const title=`${data.school||"미입력"} ${data.grade||""} ${data.name||""} — ${data.selectedTopic||"주제 미선택"}`;
-      await addDoc(collection(window._fbDb,"reports"),{
-        userId:user.uid,userName:user.name||"",
-        title,data:JSON.parse(JSON.stringify(data)),
-        updatedAt:serverTimestamp()
-      });
-      alert("저장되었습니다!");
+      // 페이지 잠금: 이미 저장된 reportId가 있으면 maxSavedPage 기록
+      const saveData={
+        userId:user.uid, userName:user.name||"",
+        title, data:JSON.parse(JSON.stringify(data)),
+        updatedAt:serverTimestamp(),
+        reportId:id
+      };
+      await setDoc(doc(window._fbDb,"reports",id), saveData, {merge:true});
+      if(onReportIdSet) onReportIdSet(id);
+      setSaveMsg("✅ 저장되었습니다!");
       loadSaves();
-    }catch(e){alert("저장 실패: "+e.message);}
+    }catch(e){setSaveMsg("❌ 저장 실패: "+e.message);}
     setLoading(false);
   };
 
   const doLoad=(item)=>{
     if(window.confirm("불러오면 현재 작업이 사라집니다. 계속할까요?")){
-      onLoad(item.data);onClose();
+      onLoad(item.data, item.reportId||item.id);
+      onClose();
     }
   };
 
   return <div className="modal-bg" onClick={onClose}>
     <div className="modal" onClick={e=>e.stopPropagation()}>
       <h3>💾 저장 / 불러오기</h3>
-      <button className="btn btn-primary" style={{width:"100%",marginBottom:16}} onClick={doSave} disabled={loading}>현재 작업 저장</button>
-      {loading&&<AILoad msg="처리 중..."/>}
-      {saves.length===0&&!loading&&<div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"20px 0"}}>저장된 자료가 없습니다.</div>}
-      {saves.map((s,i)=>(
+      <button className="btn btn-primary" style={{width:"100%",marginBottom:8}} onClick={doSave} disabled={loading}>
+        {loading?"저장 중...":"💾 현재 작업 저장"}
+      </button>
+      {saveMsg&&<div style={{fontSize:12,textAlign:"center",color:saveMsg.startsWith("✅")?"var(--success)":"var(--danger)",marginBottom:10}}>{saveMsg}</div>}
+      {loading&&<AILoad msg="저장 중..."/>}
+      <div className="sec-label" style={{marginTop:16}}>저장된 보고서 목록</div>
+      {saves.length===0&&!loading&&<div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"16px 0"}}>저장된 보고서가 없습니다.</div>}
+      {saves.map((s)=>(
         <div key={s.id} className="save-item" onClick={()=>doLoad(s)}>
           <div className="save-item-title">{s.title}</div>
           <div className="save-item-meta">{s.updatedAt?.toDate?.()?.toLocaleString("ko-KR")||"날짜 없음"}</div>
@@ -874,30 +884,85 @@ function AdminScreen({user,onLogout}){
 // ════════════════════════════════════════════════════════════════════════════
 // ─── REPORT APP (학생용 탐구보고서 작성) ────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
-function ReportApp({user,onLogout,onCoinUpdate}){
+function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
   const [page,setPage]=useState(0);
   const [showSave,setShowSave]=useState(false);
-  const [data,setData]=useState(()=>({...JSON.parse(JSON.stringify(INIT)),school:user.school||"",grade:user.grade||"",name:user.name||""}));
+  const [showReports,setShowReports]=useState(false);
+  const [reportId,setReportId]=useState(initReportId||null);
+  // maxPage: 저장 이후 되돌아갈 수 있는 최대 페이지 제한
+  const [maxSavedPage,setMaxSavedPage]=useState(initData?99:0);
+  const [data,setData]=useState(()=>
+    initData?{...initData}:{...JSON.parse(JSON.stringify(INIT)),school:user.school||"",grade:user.grade||"",name:user.name||""}
+  );
 
+  // toc 동기화
   useEffect(()=>{
     const items=data.questions.map((q,i)=>q.text?`${i+1}. ${q.text}`:`${i+1}번째 탐구 질문`);
     setData(p=>({...p,toc:{...p.toc,body:{items}}}));
   },[data.questions.length,data.questions.map(q=>q.text).join("|")]);
 
-  const go=(n)=>{setPage(n);window.scrollTo(0,0);};
-  const reset=()=>{if(window.confirm("모든 내용이 초기화됩니다. 계속할까요?")){setData({...JSON.parse(JSON.stringify(INIT)),school:user.school||"",grade:user.grade||"",name:user.name||""});go(0);}};
+  // 자동저장: 페이지 이동할 때마다 Firebase에 저장
+  const autoSave=async(currentData, currentReportId)=>{
+    if(!currentReportId) return;
+    try{
+      await waitFb();
+      const {doc,setDoc,serverTimestamp}=window._fbFns;
+      const title=`${currentData.school||""} ${currentData.grade||""} ${currentData.name||""} — ${currentData.selectedTopic||"작성 중"}`;
+      await setDoc(doc(window._fbDb,"reports",currentReportId),{
+        userId:user.uid, userName:user.name||"",
+        title, data:JSON.parse(JSON.stringify(currentData)),
+        updatedAt:serverTimestamp(),
+        reportId:currentReportId
+      },{merge:true});
+    }catch(e){console.warn("자동저장 실패:",e.message);}
+  };
 
-  // Page components (inline for brevity — same as v2.7)
+  const go=(n)=>{
+    // 페이지 잠금: 저장 전 페이지는 이전 페이지로만 이동 가능
+    // maxSavedPage가 0이면 잠금 없음(새 보고서), 저장 후엔 앞 페이지 수정 제한
+    if(maxSavedPage>0 && n < page){
+      // 이전 페이지로 돌아가는건 허용하되 수정은 읽기전용 처리
+    }
+    setPage(n);
+    window.scrollTo(0,0);
+    // 페이지 이동시 자동저장
+    if(reportId) autoSave(data, reportId);
+  };
+
+  const handleReportIdSet=(id)=>{
+    setReportId(id);
+    setMaxSavedPage(page); // 현재 페이지까지는 수정 불가 처리
+  };
+
+  const reset=()=>{
+    if(window.confirm("모든 내용이 초기화됩니다. 계속할까요?")){
+      setData({...JSON.parse(JSON.stringify(INIT)),school:user.school||"",grade:user.grade||"",name:user.name||""});
+      setReportId(null);setMaxSavedPage(0);go(0);
+    }
+  };
+
+  // 이전 보고서 불러오기
+  const handleLoad=(d, id)=>{
+    setData(d);
+    setReportId(id||null);
+    setMaxSavedPage(99); // 불러온 보고서는 모든 페이지 수정 가능
+    setShowSave(false);setShowReports(false);
+    go(0);
+  };
+
+  // 페이지가 이전 저장 페이지보다 앞이면 읽기전용 표시
+  const isLocked=(pageIdx)=> maxSavedPage>0 && pageIdx < maxSavedPage && reportId;
+
   const pages=[
-    <P1 data={data} set={setData} user={user} onNext={()=>go(1)}/>,
-    <P2 data={data} set={setData} onPrev={()=>go(0)} onNext={()=>go(2)}/>,
-    <P3 data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)}/>,
-    <P4 data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)}/>,
-    <P5 data={data} set={setData} onPrev={()=>go(3)} onNext={()=>go(5)}/>,
-    <P6 data={data} set={setData} onPrev={()=>go(4)} onNext={()=>go(6)}/>,
-    <P7 data={data} set={setData} onPrev={()=>go(5)} onNext={()=>go(7)}/>,
-    <P8 data={data} set={setData} onPrev={()=>go(6)} onNext={()=>go(8)}/>,
-    <P9 data={data} set={setData} onPrev={()=>go(7)} onNext={()=>go(9)}/>,
+    <P1 data={data} set={setData} user={user} onNext={()=>go(1)} locked={isLocked(0)}/>,
+    <P2 data={data} set={setData} onPrev={()=>go(0)} onNext={()=>go(2)} locked={isLocked(1)}/>,
+    <P3 data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)} locked={isLocked(2)}/>,
+    <P4 data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)} locked={isLocked(3)}/>,
+    <P5 data={data} set={setData} onPrev={()=>go(3)} onNext={()=>go(5)} locked={isLocked(4)}/>,
+    <P6 data={data} set={setData} onPrev={()=>go(4)} onNext={()=>go(6)} locked={isLocked(5)}/>,
+    <P7 data={data} set={setData} onPrev={()=>go(5)} onNext={()=>go(7)} locked={isLocked(6)}/>,
+    <P8 data={data} set={setData} onPrev={()=>go(6)} onNext={()=>go(8)} locked={isLocked(7)}/>,
+    <P9 data={data} set={setData} onPrev={()=>go(7)} onNext={()=>go(9)} locked={isLocked(8)}/>,
     <P10 data={data} set={setData} onPrev={()=>go(8)} onNext={()=>go(10)}/>,
     <P11 data={data} set={setData} onPrev={()=>go(9)} onNext={()=>go(11)}/>,
     <P12 data={data} set={setData} onPrev={()=>go(10)}/>,
@@ -908,19 +973,64 @@ function ReportApp({user,onLogout,onCoinUpdate}){
       <div className="logo">STUDY<span>.</span>AI</div>
       <div className="prog-track">
         {PAGES.map((name,i)=>(
-          <div key={i} className={`prog-dot ${i===page?"active":i<page?"done":""}`} onClick={()=>go(i)} title={name}/>
+          <div key={i} className={`prog-dot ${i===page?"active":i<page?"done":""}`}
+            onClick={()=>go(i)} title={name}
+            style={{opacity:isLocked(i)?0.4:1}}/>
         ))}
       </div>
       <div className="topbar-right">
         <div className="page-name">{PAGES[page]}</div>
         <div className="coin-badge">🪙 {user.coins||0}</div>
+        {reportId&&<div style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--success)",padding:"3px 8px",border:"1px solid var(--success)",borderRadius:4}}>자동저장 ON</div>}
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowSave(true)}>💾 저장</button>
+        <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowReports(true)}>📋 내 보고서</button>
         <button className="btn btn-danger" style={{fontSize:11,padding:"5px 10px"}} onClick={reset}>↺</button>
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={onLogout}>로그아웃</button>
       </div>
     </div>
     <div className="page-wrap">{pages[page]}</div>
-    {showSave&&<SaveModal data={data} user={user} onClose={()=>setShowSave(false)} onLoad={(d)=>{setData(d);go(0);}}/>}
+    {showSave&&<SaveModal data={data} user={user} reportId={reportId}
+      onReportIdSet={handleReportIdSet}
+      onClose={()=>setShowSave(false)}
+      onLoad={handleLoad}/>}
+    {showReports&&<MyReportsModal user={user} onClose={()=>setShowReports(false)} onLoad={handleLoad}/>}
+  </div>;
+}
+
+// ─── My Reports Modal ─────────────────────────────────────────────────────
+function MyReportsModal({user,onClose,onLoad}){
+  const [reports,setReports]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        await waitFb();
+        const {collection,query,where,orderBy,getDocs}=window._fbFns;
+        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),orderBy("updatedAt","desc"));
+        const snap=await getDocs(q);
+        setReports(snap.docs.map(d=>({id:d.id,...d.data()})));
+      }catch(e){console.error(e);}
+      setLoading(false);
+    })();
+  },[]);
+
+  return <div className="modal-bg" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>📋 내 보고서 목록</h3>
+      {loading&&<AILoad msg="불러오는 중..."/>}
+      {!loading&&reports.length===0&&<div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"20px 0"}}>저장된 보고서가 없습니다.</div>}
+      {reports.map(r=>(
+        <div key={r.id} className="save-item" onClick={()=>onLoad(r.data, r.reportId||r.id)}>
+          <div className="save-item-title">{r.data?.selectedTopic||r.title||"주제 없음"}</div>
+          <div style={{fontSize:11,color:"var(--text3)",marginTop:3,display:"flex",gap:10}}>
+            <span>{r.data?.school||""} {r.data?.grade||""} {r.data?.name||""}</span>
+            <span style={{fontFamily:"var(--mono)"}}>{r.updatedAt?.toDate?.()?.toLocaleString("ko-KR")||"날짜 없음"}</span>
+          </div>
+        </div>
+      ))}
+      <button className="btn btn-ghost" style={{width:"100%",marginTop:12}} onClick={onClose}>닫기</button>
+    </div>
   </div>;
 }
 
@@ -1233,7 +1343,7 @@ JSON:{"motivation":"내용","purpose":"내용","necessity":"내용"}`);
     setLoading(false);setWhich(null);
   };
 
-  useEffect(()=>{if(data.writeMode==="ai"&&!data.intro?.motivation)gen("all");},[]);
+  useEffect(()=>{if(data.writeMode==="ai"&&!data.intro?.motivation&&!data.locked)gen("all");},[]);
 
   return <div className="fade">
     <PH page={7} title="서론 작성" sub="탐구의 동기·목적·필요성을 작성하세요. (각 300~500자 권장)"/>
@@ -1629,10 +1739,13 @@ JSON:{"motivation":"내용","process":"내용","skills":"내용","learned":"내�
 // ─── APP ROOT ──────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
 function App(){
-  const [user,setUser]=useState(null);       // null = 로딩중, false = 미로그인
+  const [user,setUser]=useState(null);
   const [checking,setChecking]=useState(true);
-  const [showCoinCheck,setShowCoinCheck]=useState(false);
-  const [reportStarted,setReportStarted]=useState(false);
+  // screen: "coin_check" | "report_home" | "writing"
+  const [screen,setScreen]=useState("coin_check");
+  const [newReportId,setNewReportId]=useState(null);
+  const [loadData,setLoadData]=useState(null);
+  const [loadReportId,setLoadReportId]=useState(null);
 
   useEffect(()=>{
     waitFb().then(()=>{
@@ -1642,45 +1755,43 @@ function App(){
           try{
             const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
             if(snap.exists()){
-              const userData={uid:fbUser.uid,...snap.data()};
-              setUser(userData);
-              // 관리자가 아니고 보고서 시작 안했으면 코인 확인
-              if(userData.role!=="admin"&&!reportStarted){
-                setShowCoinCheck(true);
-              }
-            }else{setUser(false);}
+              setUser({uid:fbUser.uid,...snap.data()});
+              setScreen("coin_check");
+            }else setUser(false);
           }catch(e){setUser(false);}
-        }else{setUser(false);}
+        }else setUser(false);
         setChecking(false);
       });
     });
   },[]);
 
-  const handleLogin=(userData)=>{
-    setUser(userData);
-    if(userData.role!=="admin") setShowCoinCheck(true);
-  };
+  const handleLogin=(userData)=>{ setUser(userData); setScreen("coin_check"); };
 
   const handleLogout=async()=>{
     await waitFb();
     const {signOut}=window._fbFns;
     await signOut(window._fbAuth);
-    setUser(false);setReportStarted(false);setShowCoinCheck(false);
+    setUser(false);setScreen("coin_check");setNewReportId(null);setLoadData(null);setLoadReportId(null);
   };
 
   const handleCoinConfirm=async()=>{
-    // 코인 1개 차감
     try{
       await waitFb();
       const {doc,updateDoc,increment}=window._fbFns;
       await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
+      const id=user.uid+"_"+Date.now();
       setUser(p=>({...p,coins:(p.coins||1)-1}));
-      setShowCoinCheck(false);setReportStarted(true);
+      setNewReportId(id);
+      setLoadData(null);setLoadReportId(null);
+      setScreen("writing");
     }catch(e){alert("코인 차감 오류: "+e.message);}
   };
 
-  const handleCoinCancel=()=>{
-    handleLogout();
+  // 기존 보고서 불러오기 (코인 차감 없음)
+  const handleLoadReport=(d,id)=>{
+    setLoadData(d);setLoadReportId(id);
+    setNewReportId(null);
+    setScreen("writing");
   };
 
   if(checking){
@@ -1689,15 +1800,100 @@ function App(){
     </div>;
   }
 
-  if(!user){return <LoginScreen onLogin={handleLogin}/>;}
+  if(!user) return <LoginScreen onLogin={handleLogin}/>;
+  if(user.role==="admin") return <AdminScreen user={user} onLogout={handleLogout}/>;
 
-  if(user.role==="admin"){return <AdminScreen user={user} onLogout={handleLogout}/>;}
-
-  if(showCoinCheck){
-    return <CoinCheckModal coins={user.coins||0} onConfirm={handleCoinConfirm} onCancel={handleCoinCancel}/>;
+  if(screen==="writing"){
+    return <ReportApp
+      user={user} onLogout={handleLogout}
+      onCoinUpdate={(c)=>setUser(p=>({...p,coins:c}))}
+      initData={loadData}
+      initReportId={loadReportId||newReportId}
+    />;
   }
 
-  return <ReportApp user={user} onLogout={handleLogout} onCoinUpdate={(c)=>setUser(p=>({...p,coins:c}))}/>;
+  // coin_check 화면 — 새 보고서 시작 or 기존 보고서 목록
+  return <ReportHomeScreen
+    user={user}
+    onLogout={handleLogout}
+    onNewReport={()=>{ /* 코인 체크 모달 */ setScreen("show_coin"); }}
+    onLoadReport={handleLoadReport}
+    showCoin={screen==="show_coin"}
+    onCoinConfirm={handleCoinConfirm}
+    onCoinCancel={()=>setScreen("coin_check")}
+  />;
+}
+
+// ─── Report Home Screen (보고서 홈) ───────────────────────────────────────
+function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel}){
+  const [reports,setReports]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        await waitFb();
+        const {collection,query,where,orderBy,getDocs}=window._fbFns;
+        const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),orderBy("updatedAt","desc"));
+        const snap=await getDocs(q);
+        setReports(snap.docs.map(d=>({id:d.id,...d.data()})));
+      }catch(e){console.error(e);}
+      setLoading(false);
+    })();
+  },[]);
+
+  return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40}}>
+    <div style={{width:"100%",maxWidth:640,margin:"0 auto"}}>
+      {/* 헤더 */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:28}}>
+        <div>
+          <div className="login-logo" style={{textAlign:"left",marginBottom:4}}>STUDY<span>.</span>AI</div>
+          <div style={{fontSize:18,fontWeight:600,color:"var(--text)"}}>{user.name}님 환영합니다!</div>
+          <div style={{fontSize:13,color:"var(--text3)",marginTop:2}}>{user.school} {user.grade}</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div className="coin-badge">🪙 {user.coins||0}</div>
+          <button className="btn btn-ghost" style={{fontSize:11}} onClick={onLogout}>로그아웃</button>
+        </div>
+      </div>
+
+      {/* 새 보고서 시작 */}
+      <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"24px",marginBottom:20,textAlign:"center"}}>
+        <div style={{fontSize:28,marginBottom:8}}>✍️</div>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:6}}>새 탐구보고서 작성</div>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>코인 1개를 사용하여 새 보고서를 시작합니다.</div>
+        <button className="btn btn-primary" style={{padding:"10px 32px"}} onClick={onNewReport} disabled={(user.coins||0)<=0}>
+          {(user.coins||0)<=0?"코인 부족 — 선생님께 요청하세요":"🪙 코인 1개 사용하여 시작"}
+        </button>
+      </div>
+
+      {/* 기존 보고서 목록 */}
+      <div className="sec-label">저장된 보고서 ({reports.length}개)</div>
+      {loading&&<AILoad msg="보고서 목록을 불러오는 중..."/>}
+      {!loading&&reports.length===0&&(
+        <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"32px",textAlign:"center",color:"var(--text3)",fontSize:13}}>
+          아직 저장된 보고서가 없습니다.<br/>새 보고서를 시작해보세요!
+        </div>
+      )}
+      {reports.map(r=>(
+        <div key={r.id} className="save-item" onClick={()=>onLoadReport(r.data, r.reportId||r.id)}
+          style={{cursor:"pointer",marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div className="save-item-title">{r.data?.selectedTopic||r.title||"주제 없음"}</div>
+              <div style={{fontSize:11,color:"var(--text3)",marginTop:3}}>
+                {r.data?.school||""} {r.data?.grade||""} {r.data?.name||""}
+              </div>
+            </div>
+            <div style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)",whiteSpace:"nowrap",marginLeft:12}}>
+              {r.updatedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+    {showCoin&&<CoinCheckModal coins={user.coins||0} onConfirm={onCoinConfirm} onCancel={onCoinCancel}/>}
+  </div>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
