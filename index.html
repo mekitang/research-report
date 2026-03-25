@@ -232,16 +232,42 @@ textarea{resize:vertical;min-height:80px;}
 const {useState,useEffect,useRef,useCallback} = React;
 
 // ─── Constants ────────────────────────────────────────────────────────────
-const GEMINI_KEY = "AIzaSyAB9y2Az-BCH2ll2N8kIW59Ohq3z3NL5Aw";
+let GEMINI_KEY = ""; // Firestore에서 로드됨
 const MODEL      = "gemini-2.5-flash";
 const PAGES      = ["기본정보","관심분야","질문구성","주제추천","목차구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서"];
 
 // ─── Gemini ───────────────────────────────────────────────────────────────
+async function loadGeminiKey(){
+  if(GEMINI_KEY) return true;
+  try{
+    await waitFb();
+    const {doc,getDoc}=window._fbFns;
+    const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
+    if(snap.exists()&&snap.data().apiKey){
+      GEMINI_KEY=snap.data().apiKey;
+      return true;
+    }
+  }catch(e){console.warn("키 로드 실패:",e.message);}
+  return false;
+}
+
 async function gemini(prompt){
+  if(!GEMINI_KEY){
+    const ok=await loadGeminiKey();
+    if(!ok) throw new Error("AI 키가 설정되지 않았습니다. 관리자에게 문의하세요.");
+  }
   const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
     {method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
      body:JSON.stringify({contents:[{parts:[{text:prompt}],role:"user"}],generationConfig:{temperature:.8,maxOutputTokens:8192}})});
-  if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
+  if(!res.ok){
+    const e=await res.json();
+    const msg=e.error?.message||"API 오류";
+    // 키 유출/만료시 초기화해서 다음에 재시도
+    if(msg.includes("leaked")||msg.includes("invalid")||msg.includes("API key")){
+      GEMINI_KEY="";
+    }
+    throw new Error(msg);
+  }
   const d=await res.json();
   return d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
 }
@@ -250,6 +276,7 @@ async function geminiJSON(prompt){
   try{return JSON.parse(raw.replace(/```json|```/g,"").trim());}catch{return null;}
 }
 async function geminiSearch(prompt){
+  if(!GEMINI_KEY){ await loadGeminiKey(); }
   const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
     {method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
      body:JSON.stringify({contents:[{parts:[{text:prompt}],role:"user"}],tools:[{googleSearch:{}}],generationConfig:{temperature:.3,maxOutputTokens:8192}})});
@@ -647,6 +674,74 @@ function SaveModal({onClose,data,user,onLoad,reportId,onReportIdSet}){
 // ════════════════════════════════════════════════════════════════════════════
 // ─── ADMIN SCREEN ──────────────────────────────────────────════════════════
 // ════════════════════════════════════════════════════════════════════════════
+// ─── API Key Manager ──────────────────────────────────────────────────────
+function ApiKeyManager(){
+  const [key,setKey]=useState("");
+  const [saved,setSaved]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [msg,setMsg]=useState("");
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        await waitFb();
+        const {doc,getDoc}=window._fbFns;
+        const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
+        if(snap.exists()&&snap.data().apiKey){
+          setSaved("AIza••••••••••••••••••"+snap.data().apiKey.slice(-4));
+        }
+      }catch(e){}
+    })();
+  },[]);
+
+  const saveKey=async()=>{
+    if(!key.trim()){setMsg("❌ API 키를 입력해주세요.");return;}
+    if(!key.startsWith("AIza")){setMsg("❌ 올바른 Gemini API 키 형식이 아닙니다. (AIza... 로 시작해야 함)");return;}
+    setLoading(true);setMsg("");
+    try{
+      await waitFb();
+      const {doc,setDoc}=window._fbFns;
+      await setDoc(doc(window._fbDb,"adminConfig","gemini"),{apiKey:key.trim()},{merge:true});
+      GEMINI_KEY=key.trim();
+      setSaved("AIza••••••••••••••••••"+key.slice(-4));
+      setKey("");
+      setMsg("✅ API 키가 저장되었습니다! 학생들이 AI 기능을 바로 사용할 수 있습니다.");
+    }catch(e){setMsg("❌ 저장 실패: "+e.message);}
+    setLoading(false);
+  };
+
+  return <div className="fade">
+    <div style={{marginBottom:28}}>
+      <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>🔑 AI 키 관리</div>
+      <div style={{fontSize:13,color:"var(--text3)"}}>Gemini API 키를 안전하게 서버에 저장합니다. GitHub 코드에는 키가 없어 유출되지 않습니다.</div>
+    </div>
+    {saved&&(
+      <div style={{background:"var(--surface2)",border:"1px solid var(--success)",borderRadius:"var(--r2)",padding:"16px 20px",marginBottom:20}}>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:4}}>현재 저장된 키</div>
+        <div style={{fontFamily:"var(--mono)",fontSize:13,color:"var(--success)"}}>{saved}</div>
+      </div>
+    )}
+    <div className="info-box">
+      📌 키 발급: <a href="https://aistudio.google.com/app/apikey" target="_blank" style={{color:"var(--accent)"}}>aistudio.google.com/app/apikey</a>에서 무료 발급
+      <br/>키가 차단되면 새 키를 발급받아 여기에 입력하면 즉시 적용됩니다.
+    </div>
+    <div className="fg">
+      <label>새 Gemini API 키 입력</label>
+      <input type="text" placeholder="AIzaSy..." value={key} onChange={e=>setKey(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveKey()}/>
+    </div>
+    {msg&&<div style={{fontSize:13,color:msg.startsWith("✅")?"var(--success)":"var(--danger)",marginBottom:12}}>{msg}</div>}
+    <button className="btn btn-primary" onClick={saveKey} disabled={loading}>{loading?"저장 중...":"🔑 API 키 저장"}</button>
+    <div style={{marginTop:28,background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"18px"}}>
+      <div className="sec-label" style={{marginBottom:10}}>키 차단 시 대처 방법</div>
+      <div style={{fontSize:13,color:"var(--text2)",lineHeight:1.8}}>
+        1. <a href="https://aistudio.google.com/app/apikey" target="_blank" style={{color:"var(--accent)"}}>Google AI Studio</a>에서 새 API 키 발급<br/>
+        2. 위 입력창에 새 키 붙여넣기 → "API 키 저장" 클릭<br/>
+        3. 즉시 적용 — 학생들 재로그인 불필요
+      </div>
+    </div>
+  </div>;
+}
+
 function AdminScreen({user,onLogout}){
   const [tab,setTab]=useState("dashboard");
   const [users,setUsers]=useState([]);
@@ -654,9 +749,13 @@ function AdminScreen({user,onLogout}){
   const [stats,setStats]=useState({totalUsers:0,totalReports:0,totalCoins:0});
   const [loading,setLoading]=useState(false);
   const [newUser,setNewUser]=useState({email:"",password:"",name:"",school:"",grade:"",coins:5});
-  const [coinModal,setCoinModal]=useState(null); // {uid,name,coins}
+  const [coinModal,setCoinModal]=useState(null);
   const [coinAmount,setCoinAmount]=useState(5);
   const [err,setErr]=useState("");
+  // 학생 편집 모달
+  const [editUserModal,setEditUserModal]=useState(null); // {id,name,school,grade,email}
+  // 보고서 편집 모달
+  const [editReportModal,setEditReportModal]=useState(null); // report 객체
 
   useEffect(()=>{fetchAll();},[]);
 
@@ -664,15 +763,18 @@ function AdminScreen({user,onLogout}){
     setLoading(true);
     try{
       await waitFb();
-      const {collection,getDocs,query}=window._fbFns;
+      const {collection,getDocs}=window._fbFns;
       const usSnap=await getDocs(collection(window._fbDb,"users"));
       const rpSnap=await getDocs(collection(window._fbDb,"reports"));
       const uList=usSnap.docs.map(d=>({id:d.id,...d.data()})).filter(u=>u.role!=="admin");
       const rList=rpSnap.docs.map(d=>({id:d.id,...d.data()}));
-      setUsers(uList);
-      setReports(rList);
-      const totalCoins=uList.reduce((s,u)=>s+(u.coins||0),0);
-      setStats({totalUsers:uList.length,totalReports:rList.length,totalCoins});
+      rList.sort((a,b)=>{
+        const ta=a.updatedAt?.toMillis?.()||0;
+        const tb=b.updatedAt?.toMillis?.()||0;
+        return tb-ta;
+      });
+      setUsers(uList); setReports(rList);
+      setStats({totalUsers:uList.length,totalReports:rList.length,totalCoins:uList.reduce((s,u)=>s+(u.coins||0),0)});
     }catch(e){console.error(e);}
     setLoading(false);
   };
@@ -682,8 +784,7 @@ function AdminScreen({user,onLogout}){
     setLoading(true);setErr("");
     try{
       await waitFb();
-      const {createUserWithEmailAndPassword}=window._fbFns;
-      const {doc,setDoc}=window._fbFns;
+      const {createUserWithEmailAndPassword,doc,setDoc}=window._fbFns;
       const cred=await createUserWithEmailAndPassword(window._fbAuth,newUser.email,newUser.password);
       await setDoc(doc(window._fbDb,"users",cred.user.uid),{
         email:newUser.email,name:newUser.name,school:newUser.school,
@@ -691,13 +792,37 @@ function AdminScreen({user,onLogout}){
         createdAt:new Date().toISOString()
       });
       setNewUser({email:"",password:"",name:"",school:"",grade:"",coins:5});
-      alert("학생 계정이 생성되었습니다!");
-      fetchAll();
-    }catch(e){
-      const msg={"auth/email-already-in-use":"이미 사용 중인 이메일입니다.","auth/weak-password":"비밀번호는 6자 이상이어야 합니다."}[e.code]||e.message;
-      setErr(msg);
-    }
+      alert("학생 계정이 생성되었습니다!");fetchAll();
+    }catch(e){setErr({"auth/email-already-in-use":"이미 사용 중인 이메일입니다.","auth/weak-password":"비밀번호는 6자 이상이어야 합니다."}[e.code]||e.message);}
     setLoading(false);
+  };
+
+  // 학생 정보 수정
+  const saveEditUser=async()=>{
+    if(!editUserModal)return;
+    try{
+      await waitFb();
+      const {doc,updateDoc}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"users",editUserModal.id),{
+        name:editUserModal.name,school:editUserModal.school,grade:editUserModal.grade
+      });
+      alert("학생 정보가 수정되었습니다!");
+      setEditUserModal(null);fetchAll();
+    }catch(e){alert("수정 실패: "+e.message);}
+  };
+
+  // 학생 삭제 (Firestore 문서만 삭제 — Auth 계정은 관리자 콘솔에서 별도 삭제)
+  const deleteUser=async(u)=>{
+    if(!window.confirm(`"${u.name}" 학생을 삭제하시겠습니까?
+⚠ Firestore 데이터만 삭제됩니다.`))return;
+    try{
+      await waitFb();
+      const {doc,updateDoc}=window._fbFns;
+      // 실제 삭제 대신 비활성화 처리 (데이터 보존)
+      await updateDoc(doc(window._fbDb,"users",u.id),{role:"deleted",deletedAt:new Date().toISOString()});
+      alert("삭제 완료. 해당 학생은 더 이상 로그인할 수 없습니다.");
+      fetchAll();
+    }catch(e){alert("삭제 실패: "+e.message);}
   };
 
   const giveCoins=async()=>{
@@ -722,7 +847,42 @@ function AdminScreen({user,onLogout}){
     }catch(e){alert("오류: "+e.message);}
   };
 
-  const TABS=[{id:"dashboard",icon:"📊",label:"대시보드"},{id:"students",icon:"👥",label:"학생 관리"},{id:"coins",icon:"🪙",label:"코인 지급"},{id:"reports",icon:"📄",label:"보고서 현황"},{id:"create",icon:"➕",label:"계정 생성"}];
+  // 보고서 저장
+  const saveEditReport=async()=>{
+    if(!editReportModal)return;
+    try{
+      await waitFb();
+      const {doc,updateDoc,serverTimestamp}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"reports",editReportModal.id),{
+        data:editReportModal.data,
+        title:`${editReportModal.data?.school||""} ${editReportModal.data?.grade||""} ${editReportModal.data?.name||""} — ${editReportModal.data?.selectedTopic||"주제없음"}`,
+        updatedAt:serverTimestamp()
+      });
+      alert("보고서가 수정되었습니다!");
+      setEditReportModal(null);fetchAll();
+    }catch(e){alert("수정 실패: "+e.message);}
+  };
+
+  // 보고서 삭제
+  const deleteReport=async(r)=>{
+    if(!window.confirm(`"${r.data?.selectedTopic||r.title}" 보고서를 삭제하시겠습니까?`))return;
+    try{
+      await waitFb();
+      const {doc,updateDoc,serverTimestamp}=window._fbFns;
+      // soft delete
+      await updateDoc(doc(window._fbDb,"reports",r.id),{deleted:true,deletedAt:serverTimestamp()});
+      alert("보고서가 삭제되었습니다.");fetchAll();
+    }catch(e){alert("삭제 실패: "+e.message);}
+  };
+
+  const TABS=[
+    {id:"dashboard",icon:"📊",label:"대시보드"},
+    {id:"students",icon:"👥",label:"학생 관리"},
+    {id:"coins",icon:"🪙",label:"코인 지급"},
+    {id:"reports",icon:"📄",label:"보고서 관리"},
+    {id:"create",icon:"➕",label:"계정 생성"},
+    {id:"apikey",icon:"🔑",label:"AI 키 관리"}
+  ];
 
   return <div className="admin-shell">
     <div className="admin-sidebar">
@@ -755,9 +915,9 @@ function AdminScreen({user,onLogout}){
         </div>
         <div className="sec-label">최근 보고서</div>
         <table className="admin-table">
-          <thead><tr><th>학생</th><th>학교/학년</th><th>제목</th><th>날짜</th></tr></thead>
+          <thead><tr><th>학생</th><th>학교/학년</th><th>탐구주제</th><th>날짜</th></tr></thead>
           <tbody>
-            {reports.slice(0,10).map(r=>(
+            {reports.filter(r=>!r.deleted).slice(0,10).map(r=>(
               <tr key={r.id}>
                 <td>{r.userName||"-"}</td>
                 <td style={{fontSize:12,color:"var(--text3)"}}>{r.data?.school||""} {r.data?.grade||""}</td>
@@ -771,11 +931,13 @@ function AdminScreen({user,onLogout}){
 
       {/* ── Students ── */}
       {tab==="students"&&<div className="fade">
-        <div style={{marginBottom:28}}>
-          <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>학생 관리</div>
-          <div style={{fontSize:13,color:"var(--text3)"}}>등록된 학생 목록입니다.</div>
+        <div style={{marginBottom:20,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>학생 관리</div>
+            <div style={{fontSize:13,color:"var(--text3)"}}>학생 정보 수정, 삭제를 할 수 있습니다.</div>
+          </div>
+          <button className="btn btn-ghost" onClick={fetchAll} disabled={loading}>🔄 새로고침</button>
         </div>
-        <button className="btn btn-ghost" style={{marginBottom:16}} onClick={fetchAll} disabled={loading}>🔄 새로고침</button>
         <table className="admin-table">
           <thead><tr><th>이름</th><th>학교</th><th>학년</th><th>이메일</th><th>코인</th><th>관리</th></tr></thead>
           <tbody>
@@ -786,7 +948,22 @@ function AdminScreen({user,onLogout}){
                 <td style={{fontSize:12,color:"var(--text3)"}}>{u.grade||"-"}</td>
                 <td style={{fontSize:12,color:"var(--text3)"}}>{u.email}</td>
                 <td><span style={{fontFamily:"var(--mono)",color:"var(--warn)",fontWeight:600}}>🪙 {u.coins||0}</span></td>
-                <td><button className="btn btn-ghost" style={{fontSize:11,padding:"3px 10px"}} onClick={()=>{setCoinModal({uid:u.id,name:u.name,coins:u.coins||0});setCoinAmount(5);}}>코인 관리</button></td>
+                <td>
+                  <div style={{display:"flex",gap:5}}>
+                    <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                      onClick={()=>setEditUserModal({id:u.id,name:u.name||"",school:u.school||"",grade:u.grade||"",email:u.email})}>
+                      ✏️ 수정
+                    </button>
+                    <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                      onClick={()=>{setCoinModal({uid:u.id,name:u.name,coins:u.coins||0});setCoinAmount(5);}}>
+                      🪙 코인
+                    </button>
+                    <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}}
+                      onClick={()=>deleteUser(u)}>
+                      삭제
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -817,19 +994,38 @@ function AdminScreen({user,onLogout}){
 
       {/* ── Reports ── */}
       {tab==="reports"&&<div className="fade">
-        <div style={{marginBottom:28}}>
-          <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>보고서 현황</div>
-          <div style={{fontSize:13,color:"var(--text3)"}}>학생들이 저장한 보고서 목록입니다.</div>
+        <div style={{marginBottom:20,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>보고서 관리</div>
+            <div style={{fontSize:13,color:"var(--text3)"}}>학생 보고서를 확인하고 수정·삭제할 수 있습니다.</div>
+          </div>
+          <button className="btn btn-ghost" onClick={fetchAll} disabled={loading}>🔄 새로고침</button>
         </div>
         <table className="admin-table">
-          <thead><tr><th>학생</th><th>학교/학년</th><th>탐구주제</th><th>저장일</th></tr></thead>
+          <thead><tr><th>학생</th><th>학교/학년</th><th>탐구주제</th><th>저장일</th><th>관리</th></tr></thead>
           <tbody>
-            {reports.map(r=>(
+            {reports.filter(r=>!r.deleted).map(r=>(
               <tr key={r.id}>
                 <td>{r.userName||"-"}</td>
                 <td style={{fontSize:12,color:"var(--text3)"}}>{r.data?.school||""} {r.data?.grade||""}</td>
-                <td style={{maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.data?.selectedTopic||r.title||"-"}</td>
-                <td style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)"}}>{r.updatedAt?.toDate?.()?.toLocaleDateString("ko-KR")||"-"}</td>
+                <td style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13}}>
+                  {r.data?.selectedTopic||r.title||"-"}
+                </td>
+                <td style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)",whiteSpace:"nowrap"}}>
+                  {r.updatedAt?.toDate?.()?.toLocaleDateString("ko-KR")||"-"}
+                </td>
+                <td>
+                  <div style={{display:"flex",gap:5}}>
+                    <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                      onClick={()=>setEditReportModal(JSON.parse(JSON.stringify(r)))}>
+                      ✏️ 수정
+                    </button>
+                    <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}}
+                      onClick={()=>deleteReport(r)}>
+                      삭제
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -864,9 +1060,12 @@ function AdminScreen({user,onLogout}){
           {loading?"생성 중...":"✅ 학생 계정 생성"}
         </button>
       </div>}
+
+      {/* ── API Key ── */}
+      {tab==="apikey"&&<ApiKeyManager/>}
     </div>
 
-    {/* Coin modal */}
+    {/* ── 코인 모달 ── */}
     {coinModal&&<div className="modal-bg" onClick={()=>setCoinModal(null)}>
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h3>🪙 코인 관리 — {coinModal.name}</h3>
@@ -882,6 +1081,72 @@ function AdminScreen({user,onLogout}){
           <button className="btn btn-danger" style={{flex:1}} onClick={takeCoins}>- {coinAmount}개 회수</button>
         </div>
         <button className="btn btn-ghost" style={{width:"100%",marginTop:10}} onClick={()=>setCoinModal(null)}>취소</button>
+      </div>
+    </div>}
+
+    {/* ── 학생 편집 모달 ── */}
+    {editUserModal&&<div className="modal-bg" onClick={()=>setEditUserModal(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h3>✏️ 학생 정보 수정</h3>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>{editUserModal.email}</div>
+        <div className="fg"><label>이름</label>
+          <input type="text" value={editUserModal.name} onChange={e=>setEditUserModal(p=>({...p,name:e.target.value}))}/>
+        </div>
+        <div className="fg"><label>학교명</label>
+          <input type="text" value={editUserModal.school} onChange={e=>setEditUserModal(p=>({...p,school:e.target.value}))}/>
+        </div>
+        <div className="fg"><label>학년</label>
+          <select value={editUserModal.grade} onChange={e=>setEditUserModal(p=>({...p,grade:e.target.value}))}>
+            <option value="">선택</option>
+            {["1학년","2학년","3학년"].map(g=><option key={g}>{g}</option>)}
+          </select>
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:8}}>
+          <button className="btn btn-primary" style={{flex:1}} onClick={saveEditUser}>✅ 저장</button>
+          <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setEditUserModal(null)}>취소</button>
+        </div>
+      </div>
+    </div>}
+
+    {/* ── 보고서 편집 모달 ── */}
+    {editReportModal&&<div className="modal-bg" onClick={()=>setEditReportModal(null)}>
+      <div className="modal" style={{maxWidth:720,maxHeight:"90vh"}} onClick={e=>e.stopPropagation()}>
+        <h3>✏️ 보고서 수정 — {editReportModal.userName||"학생"}</h3>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>
+          {editReportModal.data?.school} {editReportModal.data?.grade} {editReportModal.data?.name}
+        </div>
+        <div className="fg"><label>탐구 주제</label>
+          <input type="text" value={editReportModal.data?.selectedTopic||""}
+            onChange={e=>setEditReportModal(p=>({...p,data:{...p.data,selectedTopic:e.target.value}}))}/>
+        </div>
+        <div className="sec-label" style={{marginTop:12}}>서론</div>
+        {[["motivation","탐구의 동기"],["purpose","탐구의 목적"],["necessity","탐구의 필요성"]].map(([k,lbl])=>(
+          <div key={k} className="fg">
+            <label>{lbl}</label>
+            <textarea rows={3} value={editReportModal.data?.intro?.[k]||""}
+              onChange={e=>setEditReportModal(p=>({...p,data:{...p.data,intro:{...p.data.intro,[k]:e.target.value}}}))}/>
+          </div>
+        ))}
+        <div className="sec-label" style={{marginTop:8}}>본론</div>
+        {(editReportModal.data?.questions||[]).map((q,i)=>(
+          <div key={i} className="fg">
+            <label>본론 {i+1} — {q.text}</label>
+            <textarea rows={4} value={editReportModal.data?.body?.[`q${i}`]||""}
+              onChange={e=>setEditReportModal(p=>({...p,data:{...p.data,body:{...p.data.body,[`q${i}`]:e.target.value}}}))}/>
+          </div>
+        ))}
+        <div className="sec-label" style={{marginTop:8}}>결론</div>
+        {[["summary","탐구 요약"],["learned","알게 된 점"],["skills","향상된 역량"],["future","추가 탐구 목표"]].map(([k,lbl])=>(
+          <div key={k} className="fg">
+            <label>{lbl}</label>
+            <textarea rows={3} value={editReportModal.data?.conclusion?.[k]||""}
+              onChange={e=>setEditReportModal(p=>({...p,data:{...p.data,conclusion:{...p.data.conclusion,[k]:e.target.value}}}))}/>
+          </div>
+        ))}
+        <div style={{display:"flex",gap:10,marginTop:12,position:"sticky",bottom:0,background:"var(--surface)",padding:"12px 0"}}>
+          <button className="btn btn-primary" style={{flex:1}} onClick={saveEditReport}>✅ 저장</button>
+          <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setEditReportModal(null)}>취소</button>
+        </div>
       </div>
     </div>}
   </div>;
