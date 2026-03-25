@@ -232,7 +232,7 @@ textarea{resize:vertical;min-height:80px;}
 const {useState,useEffect,useRef,useCallback} = React;
 
 // ─── Constants ────────────────────────────────────────────────────────────
-const GEMINI_KEY = "AIzaSyB5kWTEC0k7whEvfP4FYocEJ7iH5BntqDk";
+const GEMINI_KEY = "AIzaSyAB9y2Az-BCH2ll2N8kIW59Ohq3z3NL5Aw";
 const MODEL      = "gemini-2.5-flash";
 const PAGES      = ["기본정보","관심분야","질문구성","주제추천","목차구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서"];
 
@@ -403,53 +403,140 @@ function downloadDoc(data,filename,includeEval=false,useCorrected=false){
 // ─── LOGIN SCREEN ──────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
 function LoginScreen({onLogin}){
+  const [mode,setMode]=useState("login"); // "login" | "signup"
   const [email,setEmail]=useState("");
   const [pw,setPw]=useState("");
+  const [pw2,setPw2]=useState("");
+  const [name,setName]=useState("");
+  const [school,setSchool]=useState("");
+  const [grade,setGrade]=useState("");
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState("");
+  const [success,setSuccess]=useState("");
+
+  const errMsg=(code)=>({
+    "auth/user-not-found":"등록되지 않은 계정입니다.",
+    "auth/wrong-password":"비밀번호가 올바르지 않습니다.",
+    "auth/invalid-email":"이메일 형식이 올바르지 않습니다.",
+    "auth/invalid-credential":"이메일 또는 비밀번호가 올바르지 않습니다.",
+    "auth/too-many-requests":"잠시 후 다시 시도해주세요.",
+    "auth/email-already-in-use":"이미 사용 중인 이메일입니다.",
+    "auth/weak-password":"비밀번호는 6자 이상이어야 합니다.",
+  }[code]||"오류가 발생했습니다. 다시 시도해주세요.");
 
   const doLogin=async()=>{
     if(!email||!pw){setErr("이메일과 비밀번호를 입력하세요.");return;}
     setLoading(true);setErr("");
     try{
       await waitFb();
-      const {signInWithEmailAndPassword}=window._fbFns;
+      const {signInWithEmailAndPassword,doc,getDoc}=window._fbFns;
       const cred=await signInWithEmailAndPassword(window._fbAuth,email,pw);
-      const {doc,getDoc}=window._fbFns;
       const snap=await getDoc(doc(window._fbDb,"users",cred.user.uid));
       if(!snap.exists()){setErr("사용자 정보를 찾을 수 없습니다.");setLoading(false);return;}
       onLogin({uid:cred.user.uid,...snap.data()});
-    }catch(e){
-      const msg={
-        "auth/user-not-found":"등록되지 않은 계정입니다.",
-        "auth/wrong-password":"비밀번호가 올바르지 않습니다.",
-        "auth/invalid-email":"이메일 형식이 올바르지 않습니다.",
-        "auth/invalid-credential":"이메일 또는 비밀번호가 올바르지 않습니다.",
-        "auth/too-many-requests":"잠시 후 다시 시도해주세요.",
-      }[e.code]||e.message;
-      setErr(msg);
-    }
+    }catch(e){setErr(errMsg(e.code));}
     setLoading(false);
   };
+
+  const doSignup=async()=>{
+    if(!email||!pw||!pw2||!name||!school||!grade){setErr("모든 항목을 입력해주세요.");return;}
+    if(pw!==pw2){setErr("비밀번호가 일치하지 않습니다.");return;}
+    if(pw.length<6){setErr("비밀번호는 6자 이상이어야 합니다.");return;}
+    setLoading(true);setErr("");
+    try{
+      await waitFb();
+      const {createUserWithEmailAndPassword,doc,setDoc}=window._fbFns;
+      const cred=await createUserWithEmailAndPassword(window._fbAuth,email,pw);
+      await setDoc(doc(window._fbDb,"users",cred.user.uid),{
+        email,name,school,grade,
+        coins:0,          // 초기 코인 0 — 관리자가 지급
+        role:"student",
+        createdAt:new Date().toISOString()
+      });
+      setSuccess("회원가입이 완료되었습니다! 선생님께 코인 지급을 요청하세요.");
+      setMode("login");
+      setEmail("");setPw("");setPw2("");setName("");setSchool("");setGrade("");
+    }catch(e){setErr(errMsg(e.code));}
+    setLoading(false);
+  };
+
+  const switchMode=(m)=>{setMode(m);setErr("");setSuccess("");};
 
   return <div className="login-wrap">
     <div className="login-box fade">
       <div className="login-logo">STUDY<span>.</span>AI</div>
       <div className="login-title">탐구보고서 AI 시스템</div>
-      <div className="login-sub">계정으로 로그인하세요</div>
+
+      {/* 탭 */}
+      <div style={{display:"flex",background:"var(--surface2)",borderRadius:"var(--r)",padding:3,marginBottom:24,gap:2}}>
+        <button onClick={()=>switchMode("login")} style={{flex:1,padding:"8px",border:"none",borderRadius:"var(--r)",cursor:"pointer",transition:"all .2s",
+          background:mode==="login"?"var(--accent)":"transparent",color:mode==="login"?"#fff":"var(--text3)",fontSize:13,fontFamily:"var(--sans)",fontWeight:500}}>
+          로그인
+        </button>
+        <button onClick={()=>switchMode("signup")} style={{flex:1,padding:"8px",border:"none",borderRadius:"var(--r)",cursor:"pointer",transition:"all .2s",
+          background:mode==="signup"?"var(--accent)":"transparent",color:mode==="signup"?"#fff":"var(--text3)",fontSize:13,fontFamily:"var(--sans)",fontWeight:500}}>
+          회원가입
+        </button>
+      </div>
+
       {err&&<div className="err-box">{err}</div>}
-      <div className="fg"><label>이메일</label>
-        <input type="email" placeholder="student@school.kr" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
-      </div>
-      <div className="fg"><label>비밀번호</label>
-        <input type="password" placeholder="••••••••" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
-      </div>
-      <button className="btn btn-primary" style={{width:"100%",marginTop:8,padding:"12px"}} onClick={doLogin} disabled={loading}>
-        {loading?"로그인 중...":"로그인"}
-      </button>
-      <div style={{textAlign:"center",marginTop:16,fontSize:12,color:"var(--text3)"}}>
-        계정이 없으신가요? 선생님께 문의하세요.
-      </div>
+      {success&&<div className="info-box" style={{borderColor:"var(--success)",background:"rgba(34,197,94,0.1)",color:"var(--success)"}}>{success}</div>}
+
+      {/* 로그인 폼 */}
+      {mode==="login"&&<>
+        <div className="fg"><label>이메일</label>
+          <input type="email" placeholder="student@school.kr" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+        </div>
+        <div className="fg"><label>비밀번호</label>
+          <input type="password" placeholder="••••••••" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",marginTop:8,padding:"12px"}} onClick={doLogin} disabled={loading}>
+          {loading?"로그인 중...":"로그인"}
+        </button>
+        <div style={{textAlign:"center",marginTop:14,fontSize:12,color:"var(--text3)"}}>
+          계정이 없으신가요?&nbsp;
+          <span style={{color:"var(--accent)",cursor:"pointer"}} onClick={()=>switchMode("signup")}>회원가입</span>
+        </div>
+      </>}
+
+      {/* 회원가입 폼 */}
+      {mode==="signup"&&<>
+        <div className="fr2">
+          <div className="fg"><label>이름 *</label>
+            <input type="text" placeholder="홍길동" value={name} onChange={e=>setName(e.target.value)}/>
+          </div>
+          <div className="fg"><label>학교명 *</label>
+            <input type="text" placeholder="○○고등학교" value={school} onChange={e=>setSchool(e.target.value)}/>
+          </div>
+        </div>
+        <div className="fg"><label>학년 *</label>
+          <select value={grade} onChange={e=>setGrade(e.target.value)}>
+            <option value="">선택하세요</option>
+            <option value="1학년">1학년</option>
+            <option value="2학년">2학년</option>
+            <option value="3학년">3학년</option>
+          </select>
+        </div>
+        <div className="fg"><label>이메일 *</label>
+          <input type="email" placeholder="student@school.kr" value={email} onChange={e=>setEmail(e.target.value)}/>
+        </div>
+        <div className="fg"><label>비밀번호 * (6자 이상)</label>
+          <input type="password" placeholder="••••••••" value={pw} onChange={e=>setPw(e.target.value)}/>
+        </div>
+        <div className="fg"><label>비밀번호 확인 *</label>
+          <input type="password" placeholder="••••••••" value={pw2} onChange={e=>setPw2(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSignup()}/>
+        </div>
+        <div className="warn-box" style={{marginTop:4}}>
+          ⚠ 회원가입 후 선생님께 <strong>코인 지급</strong>을 요청해야 탐구보고서를 작성할 수 있습니다.
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",marginTop:8,padding:"12px"}} onClick={doSignup} disabled={loading}>
+          {loading?"가입 중...":"회원가입"}
+        </button>
+        <div style={{textAlign:"center",marginTop:14,fontSize:12,color:"var(--text3)"}}>
+          이미 계정이 있으신가요?&nbsp;
+          <span style={{color:"var(--accent)",cursor:"pointer"}} onClick={()=>switchMode("login")}>로그인</span>
+        </div>
+      </>}
     </div>
   </div>;
 }
