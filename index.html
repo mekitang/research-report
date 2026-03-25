@@ -1207,12 +1207,7 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
     setMaxSavedPage(page); // 현재 페이지까지는 수정 불가 처리
   };
 
-  const reset=()=>{
-    if(window.confirm("모든 내용이 초기화됩니다. 계속할까요?")){
-      setData({...JSON.parse(JSON.stringify(INIT)),school:user.school||"",grade:user.grade||"",name:user.name||""});
-      setReportId(null);setMaxSavedPage(0);go(0);
-    }
-  };
+
 
   // 이전 보고서 불러오기
   const handleLoad=(d, id)=>{
@@ -1258,7 +1253,7 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
         {reportId&&<div style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--success)",padding:"3px 8px",border:"1px solid var(--success)",borderRadius:4}}>자동저장 ON</div>}
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowSave(true)}>💾 저장</button>
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowReports(true)}>📋 내 보고서</button>
-        <button className="btn btn-danger" style={{fontSize:11,padding:"5px 10px"}} onClick={reset}>↺</button>
+
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={onLogout}>로그아웃</button>
       </div>
     </div>
