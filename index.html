@@ -750,14 +750,18 @@ function AdminScreen({user,onLogout}){
   const [reports,setReports]=useState([]);
   const [stats,setStats]=useState({totalUsers:0,totalReports:0,totalCoins:0});
   const [loading,setLoading]=useState(false);
-  const [newUser,setNewUser]=useState({email:"",password:"",name:"",school:"",grade:"",coins:5});
+  const [newUser,setNewUser]=useState({email:"",password:"",name:"",school:"",grade:"",coins:3});
   const [coinModal,setCoinModal]=useState(null);
   const [coinAmount,setCoinAmount]=useState(5);
   const [err,setErr]=useState("");
   // 학생 편집 모달
-  const [editUserModal,setEditUserModal]=useState(null); // {id,name,school,grade,email}
-  // 보고서 편집 모달
-  const [editReportModal,setEditReportModal]=useState(null); // report 객체
+  const [editUserModal,setEditUserModal]=useState(null);
+  const [editReportModal,setEditReportModal]=useState(null);
+  // 학생 검색 필터
+  const [filterSchool,setFilterSchool]=useState("");
+  const [filterGrade,setFilterGrade]=useState("");
+  // 학생별 보고서 뷰어
+  const [studentReportModal,setStudentReportModal]=useState(null); // {user, reports[]}
 
   useEffect(()=>{fetchAll();},[]);
 
@@ -790,10 +794,10 @@ function AdminScreen({user,onLogout}){
       const cred=await createUserWithEmailAndPassword(window._fbAuth,newUser.email,newUser.password);
       await setDoc(doc(window._fbDb,"users",cred.user.uid),{
         email:newUser.email,name:newUser.name,school:newUser.school,
-        grade:newUser.grade,coins:parseInt(newUser.coins)||5,role:"student",
+        grade:newUser.grade,coins:parseInt(newUser.coins)||3,role:"student",
         createdAt:new Date().toISOString()
       });
-      setNewUser({email:"",password:"",name:"",school:"",grade:"",coins:5});
+      setNewUser({email:"",password:"",name:"",school:"",grade:"",coins:3});
       alert("학생 계정이 생성되었습니다!");fetchAll();
     }catch(e){setErr({"auth/email-already-in-use":"이미 사용 중인 이메일입니다.","auth/weak-password":"비밀번호는 6자 이상이어야 합니다."}[e.code]||e.message);}
     setLoading(false);
@@ -932,45 +936,91 @@ function AdminScreen({user,onLogout}){
       </div>}
 
       {/* ── Students ── */}
-      {tab==="students"&&<div className="fade">
-        <div style={{marginBottom:20,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div>
-            <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>학생 관리</div>
-            <div style={{fontSize:13,color:"var(--text3)"}}>학생 정보 수정, 삭제를 할 수 있습니다.</div>
+      {tab==="students"&&(()=>{
+        // 학교/학년 목록 추출
+        const schools=[...new Set(users.map(u=>u.school).filter(Boolean))].sort();
+        const grades=["1학년","2학년","3학년"];
+        // 필터 적용
+        const filtered=users.filter(u=>
+          (!filterSchool||u.school===filterSchool)&&
+          (!filterGrade||u.grade===filterGrade)
+        );
+        return <div className="fade">
+          <div style={{marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>학생 관리</div>
+              <div style={{fontSize:13,color:"var(--text3)"}}>총 {filtered.length}명 (전체 {users.length}명)</div>
+            </div>
+            <button className="btn btn-ghost" onClick={fetchAll} disabled={loading}>🔄 새로고침</button>
           </div>
-          <button className="btn btn-ghost" onClick={fetchAll} disabled={loading}>🔄 새로고침</button>
-        </div>
-        <table className="admin-table">
-          <thead><tr><th>이름</th><th>학교</th><th>학년</th><th>이메일</th><th>코인</th><th>관리</th></tr></thead>
-          <tbody>
-            {users.map(u=>(
-              <tr key={u.id}>
-                <td style={{fontWeight:500}}>{u.name||"-"}</td>
-                <td style={{fontSize:12,color:"var(--text3)"}}>{u.school||"-"}</td>
-                <td style={{fontSize:12,color:"var(--text3)"}}>{u.grade||"-"}</td>
-                <td style={{fontSize:12,color:"var(--text3)"}}>{u.email}</td>
-                <td><span style={{fontFamily:"var(--mono)",color:"var(--warn)",fontWeight:600}}>🪙 {u.coins||0}</span></td>
-                <td>
-                  <div style={{display:"flex",gap:5}}>
-                    <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
-                      onClick={()=>setEditUserModal({id:u.id,name:u.name||"",school:u.school||"",grade:u.grade||"",email:u.email})}>
-                      ✏️ 수정
-                    </button>
-                    <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
-                      onClick={()=>{setCoinModal({uid:u.id,name:u.name,coins:u.coins||0});setCoinAmount(5);}}>
-                      🪙 코인
-                    </button>
-                    <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}}
-                      onClick={()=>deleteUser(u)}>
-                      삭제
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>}
+          {/* 검색 필터 */}
+          <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <label style={{fontSize:11,whiteSpace:"nowrap"}}>학교</label>
+              <select value={filterSchool} onChange={e=>setFilterSchool(e.target.value)}
+                style={{width:160,padding:"7px 10px",fontSize:12}}>
+                <option value="">전체</option>
+                {schools.map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <label style={{fontSize:11,whiteSpace:"nowrap"}}>학년</label>
+              <select value={filterGrade} onChange={e=>setFilterGrade(e.target.value)}
+                style={{width:120,padding:"7px 10px",fontSize:12}}>
+                <option value="">전체</option>
+                {grades.map(g=><option key={g} value={g}>{g}</option>)}
+              </select>
+            </div>
+            {(filterSchool||filterGrade)&&
+              <button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>{setFilterSchool("");setFilterGrade("");}}>
+                ✕ 필터 초기화
+              </button>}
+          </div>
+          <table className="admin-table">
+            <thead><tr><th>이름</th><th>학교</th><th>학년</th><th>이메일</th><th>코인</th><th>관리</th></tr></thead>
+            <tbody>
+              {filtered.map(u=>(
+                <tr key={u.id}>
+                  <td>
+                    <span style={{fontWeight:500,color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
+                      onClick={()=>{
+                        const userReports=reports.filter(r=>r.userId===u.id&&!r.deleted);
+                        setStudentReportModal({user:u, reports:userReports});
+                      }}>
+                      {u.name||"-"}
+                    </span>
+                  </td>
+                  <td style={{fontSize:12,color:"var(--text3)"}}>{u.school||"-"}</td>
+                  <td style={{fontSize:12,color:"var(--text3)"}}>{u.grade||"-"}</td>
+                  <td style={{fontSize:12,color:"var(--text3)"}}>{u.email}</td>
+                  <td><span style={{fontFamily:"var(--mono)",color:"var(--warn)",fontWeight:600}}>🪙 {u.coins||0}</span></td>
+                  <td>
+                    <div style={{display:"flex",gap:5}}>
+                      <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                        onClick={()=>{const userReports=reports.filter(r=>r.userId===u.id&&!r.deleted);setStudentReportModal({user:u,reports:userReports});}}>
+                        📄 보고서
+                      </button>
+                      <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                        onClick={()=>setEditUserModal({id:u.id,name:u.name||"",school:u.school||"",grade:u.grade||"",email:u.email})}>
+                        ✏️ 수정
+                      </button>
+                      <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 9px"}}
+                        onClick={()=>{setCoinModal({uid:u.id,name:u.name,coins:u.coins||0});setCoinAmount(3);}}>
+                        🪙
+                      </button>
+                      <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}}
+                        onClick={()=>deleteUser(u)}>
+                        삭제
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filtered.length===0&&<tr><td colSpan={6} style={{textAlign:"center",color:"var(--text3)",padding:"24px"}}>검색 결과가 없습니다.</td></tr>}
+            </tbody>
+          </table>
+        </div>;
+      })()}
 
       {/* ── Coins ── */}
       {tab==="coins"&&<div className="fade">
@@ -1107,6 +1157,67 @@ function AdminScreen({user,onLogout}){
           <button className="btn btn-primary" style={{flex:1}} onClick={saveEditUser}>✅ 저장</button>
           <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setEditUserModal(null)}>취소</button>
         </div>
+      </div>
+    </div>}
+
+    {/* ── 학생 보고서 뷰어 모달 ── */}
+    {studentReportModal&&<div className="modal-bg" onClick={()=>setStudentReportModal(null)}>
+      <div className="modal" style={{maxWidth:700,maxHeight:"90vh"}} onClick={e=>e.stopPropagation()}>
+        <h3>📄 {studentReportModal.user.name}님의 보고서</h3>
+        <div style={{fontSize:12,color:"var(--text3)",marginBottom:16}}>
+          {studentReportModal.user.school} {studentReportModal.user.grade} · {studentReportModal.user.email} · 🪙 {studentReportModal.user.coins||0}
+        </div>
+        {studentReportModal.reports.length===0?(
+          <div style={{textAlign:"center",padding:"32px 0",color:"var(--text3)",fontSize:13}}>저장된 보고서가 없습니다.</div>
+        ):(
+          studentReportModal.reports.map((r,idx)=>(
+            <div key={r.id} style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                <div>
+                  <div style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:3}}>{r.data?.selectedTopic||r.title||"주제 없음"}</div>
+                  <div style={{fontSize:11,color:"var(--text3)",fontFamily:"var(--mono)"}}>
+                    {r.updatedAt?.toDate?.()?.toLocaleString("ko-KR")||"날짜 없음"}
+                  </div>
+                </div>
+                <button className="btn btn-success" style={{fontSize:11,padding:"5px 12px",flexShrink:0}}
+                  onClick={()=>{
+                    if(!r.data)return;
+                    const esc=(s)=>(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+                    const refsH=buildRefsHTML(r.data);
+                    const body=`<h1 style="text-align:center;font-size:22px;margin-bottom:4px">${esc(r.data.selectedTopic||"")}</h1>
+<p style="text-align:center;color:#555;font-size:13px;margin-bottom:40px">${esc(r.data.school||"")} ${esc(r.data.grade||"")} ${esc(r.data.name||"")}</p>
+<h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">Ⅰ. 서론</h2>
+<h3 style="font-size:14px;color:#333;margin-top:18px">1.1 탐구의 동기</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.intro?.motivation||"")}</p>
+<h3 style="font-size:14px;color:#333;margin-top:18px">1.2 탐구의 목적</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.intro?.purpose||"")}</p>
+<h3 style="font-size:14px;color:#333;margin-top:18px">1.3 탐구의 필요성</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.intro?.necessity||"")}</p>
+<h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">Ⅱ. 본론</h2>
+${(r.data.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-top:18px">${i+1}. ${esc(q.text)}</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.body?.["q"+i]||"")}</p>`).join("")}
+<h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">Ⅲ. 결론</h2>
+<h3 style="font-size:14px;color:#333;margin-top:18px">3.1 탐구 요약</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.conclusion?.summary||"")}</p>
+<h3 style="font-size:14px;color:#333;margin-top:18px">3.2 알게 된 점</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.conclusion?.learned||"")}</p>
+<h3 style="font-size:14px;color:#333;margin-top:18px">3.3 향상된 역량</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.conclusion?.skills||"")}</p>
+<h3 style="font-size:14px;color:#333;margin-top:18px">3.4 추가 탐구 목표</h3><p style="white-space:pre-wrap;line-height:1.9">${esc(r.data.conclusion?.future||"")}</p>
+<h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">참고문헌</h2>${refsH}`;
+                    const pdfStyle=`@page{size:A4;margin:2.5cm}body{font-family:'맑은 고딕','Noto Sans KR',Arial,sans-serif;font-size:14px;line-height:1.9;color:#111}h1,h2,h3{font-family:'맑은 고딕','Noto Sans KR',Arial,sans-serif}p{margin-bottom:10px}`;
+                    const full=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(r.data.selectedTopic||"보고서")}</title><style>${pdfStyle}@media screen{body{padding:2cm;max-width:21cm;margin:0 auto}}</style></head><body>${body}<script>(function(){window.addEventListener("load",function(){setTimeout(function(){window.print();},400);});})()<\/script></body></html>`;
+                    const blob=new Blob(["﻿"+full],{type:"text/html;charset=utf-8"});
+                    const url=URL.createObjectURL(blob);
+                    const a=document.createElement("a");
+                    a.href=url;a.download=`${esc(r.data.name||"학생")}_${esc(r.data.selectedTopic||"보고서").slice(0,20)}.html`;
+                    a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);
+                  }}>
+                  📄 PDF 저장
+                </button>
+              </div>
+              {/* 보고서 미리보기 (접기/펼치기) */}
+              <div style={{fontSize:12,color:"var(--text3)",lineHeight:1.7}}>
+                {r.data?.intro?.motivation&&<div><strong>동기:</strong> {r.data.intro.motivation.slice(0,80)}...</div>}
+                {r.data?.conclusion?.summary&&<div style={{marginTop:4}}><strong>요약:</strong> {r.data.conclusion.summary.slice(0,80)}...</div>}
+              </div>
+            </div>
+          ))
+        )}
+        <button className="btn btn-ghost" style={{width:"100%",marginTop:12}} onClick={()=>setStudentReportModal(null)}>닫기</button>
       </div>
     </div>}
 
