@@ -234,7 +234,7 @@ const {useState,useEffect,useRef,useCallback} = React;
 // ─── Constants ────────────────────────────────────────────────────────────
 let GEMINI_KEY = ""; // Firestore에서 로드됨
 const MODEL      = "gemini-2.5-flash";
-const PAGES      = ["기본정보","관심분야","질문구성","주제추천","목차구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
+const PAGES      = ["기본정보","관심분야","주제추천","소주제구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
 // ─── Gemini ───────────────────────────────────────────────────────────────
 async function loadGeminiKey(){
@@ -283,7 +283,14 @@ async function geminiSearch(prompt){
   if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
   const d=await res.json();
   const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
-  const sources=(d.candidates?.[0]?.groundingMetadata?.groundingChunks||[]).filter(c=>c.web?.uri).map(c=>({url:c.web.uri,title:c.web.title||c.web.uri}));
+  const rawSources=(d.candidates?.[0]?.groundingMetadata?.groundingChunks||[]).filter(c=>c.web?.uri).map(c=>({url:c.web.uri,title:c.web.title||c.web.uri}));
+  // 한국 자료 우선 정렬: .kr 도메인, 한국어 사이트 앞으로
+  const KOREAN_DOMAINS=["riss.kr","dbpia.co.kr","kiss.kstudy.com","academic.naver.com","kci.go.kr","ndsl.kr","prism.go.kr","moe.go.kr","kedi.re.kr","naver.com","daum.net","chosun.com","hani.co.kr","yonhapnews.co.kr","yna.co.kr","khan.co.kr","donga.com","joins.com","edaily.co.kr","kbs.co.kr","mbc.co.kr","sbs.co.kr"];
+  const isKorean=(url)=>KOREAN_DOMAINS.some(d=>url.includes(d))||url.includes(".kr/");
+  const koSources=rawSources.filter(s=>isKorean(s.url));
+  const enSources=rawSources.filter(s=>!isKorean(s.url));
+  // 한국 자료 최대 3개 + 해외 1개
+  const sources=[...koSources.slice(0,3),...enSources.slice(0,1)];
   return {text,sources};
 }
 
@@ -298,6 +305,8 @@ const INIT={
   school:"",grade:"",name:"",
   field:"",interest:"",keywords:[],
   questions:[{text:"",reason:"",link:"",links:[]},{text:"",reason:"",link:"",links:[]},{text:"",reason:"",link:"",links:[]}],
+  bodyCount:3,
+  subTopicCount:3,
   suggestedTopics:[],selectedTopic:"",topicLevel:"mid",
   toc:{intro:{motivation:"1.1 탐구의 동기",purpose:"1.2 탐구의 목적",necessity:"1.3 탐구의 필요성"},
        body:{items:[]},
@@ -1268,7 +1277,7 @@ ${(r.data.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin
 // ════════════════════════════════════════════════════════════════════════════
 // ─── REPORT APP (학생용 탐구보고서 작성) ────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
-function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
+function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onFinish,onGoHome}){
   const [page,setPage]=useState(0);
   const [showSave,setShowSave]=useState(false);
   const [showReports,setShowReports]=useState(false);
@@ -1333,19 +1342,18 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
   const isLocked=(pageIdx)=> maxSavedPage>0 && pageIdx < maxSavedPage && reportId;
 
   const pages=[
-    <P1 data={data} set={setData} user={user} onNext={()=>go(1)} locked={isLocked(0)}/>,
-    <P2 data={data} set={setData} onPrev={()=>go(0)} onNext={()=>go(2)} locked={isLocked(1)}/>,
-    <P3 data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)} locked={isLocked(2)}/>,
-    <P4 data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)} locked={isLocked(3)}/>,
-    <P5 data={data} set={setData} onPrev={()=>go(3)} onNext={()=>go(5)} locked={isLocked(4)}/>,
-    <P6 data={data} set={setData} onPrev={()=>go(4)} onNext={()=>go(6)} locked={isLocked(5)}/>,
-    <P7 data={data} set={setData} onPrev={()=>go(5)} onNext={()=>go(7)} locked={isLocked(6)}/>,
-    <P8 data={data} set={setData} onPrev={()=>go(6)} onNext={()=>go(8)} locked={isLocked(7)}/>,
-    <P9 data={data} set={setData} onPrev={()=>go(7)} onNext={()=>go(9)} locked={isLocked(8)}/>,
-    <P10 data={data} set={setData} onPrev={()=>go(8)} onNext={()=>go(10)}/>,
-    <P11 data={data} set={setData} onPrev={()=>go(9)} onNext={()=>go(11)}/>,
-    <P12 data={data} set={setData} onPrev={()=>go(10)} onNext={()=>go(12)}/>,
-    <P13 data={data} set={setData} onPrev={()=>go(11)}/>,
+    <P1  data={data} set={setData} user={user} onNext={()=>go(1)}  locked={isLocked(0)}/>,
+    <P2  data={data} set={setData} onPrev={()=>go(0)} onNext={()=>go(2)}  locked={isLocked(1)}/>,
+    <P4  data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)}  locked={isLocked(2)}/>,
+    <P3  data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)}  locked={isLocked(3)}/>,
+    <P6  data={data} set={setData} onPrev={()=>go(3)} onNext={()=>go(5)}  locked={isLocked(4)}/>,
+    <P7  data={data} set={setData} onPrev={()=>go(4)} onNext={()=>go(6)}  locked={isLocked(5)}/>,
+    <P8  data={data} set={setData} onPrev={()=>go(5)} onNext={()=>go(7)}  locked={isLocked(6)}/>,
+    <P9  data={data} set={setData} onPrev={()=>go(6)} onNext={()=>go(8)}  locked={isLocked(7)}/>,
+    <P10 data={data} set={setData} onPrev={()=>go(7)} onNext={()=>go(9)}/>,
+    <P11 data={data} set={setData} onPrev={()=>go(8)} onNext={()=>go(10)}/>,
+    <P12 data={data} set={setData} onPrev={()=>go(9)} onNext={()=>go(11)}/>,
+    <P13 data={data} set={setData} onPrev={()=>go(10)} onFinish={onFinish}/>,
   ];
 
   return <div className="shell">
@@ -1364,6 +1372,7 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId}){
         {reportId&&<div style={{fontSize:10,fontFamily:"var(--mono)",color:"var(--success)",padding:"3px 8px",border:"1px solid var(--success)",borderRadius:4}}>자동저장 ON</div>}
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowSave(true)}>💾 저장</button>
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>setShowReports(true)}>📋 내 보고서</button>
+        {onGoHome&&<button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={()=>{if(window.confirm("홈으로 이동합니다. 작성 중인 내용은 저장된 상태로 유지됩니다."))onGoHome();}}>🏠 홈</button>}
 
         <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 10px"}} onClick={onLogout}>로그아웃</button>
       </div>
@@ -1474,34 +1483,63 @@ function P2({data,set,onPrev,onNext}){
 function P3({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState("");
-  const updQ=(i,k,v)=>{const q=[...data.questions];q[i]={...q[i],[k]:v};set(p=>({...p,questions:q}));};
-  const updLink=(i,li,field,v)=>{const q=[...data.questions];const links=[...(q[i].links||[])];links[li]={...links[li],[field]:v};q[i]={...q[i],links,link:links[0]?.url||""};set(p=>({...p,questions:q}));};
-  const addLink=(i)=>{const q=[...data.questions];q[i]={...q[i],links:[...(q[i].links||[]),{url:"",title:"직접 입력"}]};set(p=>({...p,questions:q}));};
-  const rmLink=(i,li)=>{const q=[...data.questions];const links=(q[i].links||[]).filter((_,idx)=>idx!==li);q[i]={...q[i],links,link:links[0]?.url||""};set(p=>({...p,questions:q}));};
-  const addQ=()=>set(p=>({...p,questions:[...p.questions,{text:"",reason:"",link:"",links:[]}]}));
-  const rmQ=(i)=>set(p=>({...p,questions:p.questions.filter((_,idx)=>idx!==i)}));
+  const subCount=data.subTopicCount||3;
+  const [enCount,setEnCount]=useState(1); // 해외 자료 최대 개수
 
-  const aiGen=async()=>{
+  const changeSubCount=(n)=>{
+    set(p=>{
+      const cur=p.questions||[];
+      let newQ;
+      if(n>cur.length){
+        newQ=[...cur,...Array(n-cur.length).fill(null).map(()=>({text:"",reason:"",link:"",links:[]}))];
+      } else {
+        newQ=cur.slice(0,n);
+      }
+      return {...p,subTopicCount:n,questions:newQ};
+    });
+  };
+
+  const updQ=(i,v)=>{
+    const q=[...data.questions];q[i]={...q[i],text:v};set(p=>({...p,questions:q}));
+  };
+
+  const aiGenSubTopics=async()=>{
+    if(!data.selectedTopic){setErr("먼저 이전 페이지에서 탐구 주제를 선택하세요.");return;}
     setLoading(true);setErr("");
     try{
-      const kw=data.keywords.join(", ");
-      const r=await geminiJSON(`고등학생 탐구보고서 탐구 질문 3개 생성.
-학년:${data.grade} / 분야:${data.field} / 세부관심:${data.interest} / 키워드:${kw}
-조건: 본론 소챕터용, 구체적, 고등학생 수준, 이유 2-3문장 포함
-JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason":"이유"},{"text":"질문","reason":"이유"}]}`);
-      if(!r?.questions){setErr("생성 실패. 다시 시도해주세요.");setLoading(false);return;}
-      const newQs=[];
-      for(let i=0;i<r.questions.length;i++){
-        const q=r.questions[i];let links=[];
-        try{
-          const {sources}=await geminiSearch(`다음 탐구 질문 관련 실제 접근 가능한 한국어 자료(논문,기사,영상) 2-3개 찾아주세요.
-질문: "${q.text}" / 분야: ${data.field}
-JSON만 출력: {"sources":[{"title":"제목","url":"https://실제URL","type":"논문|기사|영상"}]}`);
-          if(sources&&sources.length>0)links=sources.slice(0,3).map(s=>({url:s.url,title:s.title||q.text+" 관련 자료"}));
-        }catch(e){console.warn("Search failed",e.message);}
-        newQs.push({text:q.text||"",reason:q.reason||"",links,link:links[0]?.url||""});
-      }
-      set(p=>({...p,questions:newQs}));
+      const lvlDesc={
+        easy:"기초 수준 — 개념 설명, 현황 조사, 사례 비교 위주",
+        mid:"심화 수준 — 원인 분석, 영향 관계, 비교 분석 포함",
+        hard:"고급 수준 — 비판적 분석, 데이터 해석, 실험적 접근"
+      };
+      const r=await geminiJSON(`고등학생 탐구보고서 본론 소주제를 정확히 ${subCount}개 추천해주세요. 반드시 ${subCount}개를 생성해야 합니다.
+탐구 주제: ${data.selectedTopic}
+관심 분야: ${data.field}
+난이도: ${lvlDesc[data.topicLevel||"mid"]}
+학년: ${data.grade}
+
+조건:
+1. 소주제 수: 정확히 ${subCount}개 (더 많거나 적으면 안 됨)
+2. 각 소주제는 탐구 주제와 직접 관련된 구체적인 소제목
+3. 논리적 흐름 순서 (개념→분석→적용/결과)
+4. 고등학생이 직접 탐구 가능한 수준
+5. 소주제마다 탐구 이유 1-2문장 포함
+
+JSON 형식 (subtopics 배열의 원소 수가 반드시 ${subCount}개):
+{"subtopics":[{"text":"소주제 제목","reason":"탐구 이유"},{"text":"소주제 제목","reason":"탐구 이유"}]}`);
+      if(r?.subtopics&&r.subtopics.length>0){
+        // 정확히 subCount 개수로 맞춤
+        let arr=[...r.subtopics];
+        // 부족하면 채우기
+        while(arr.length<subCount) arr.push({text:"소주제 "+(arr.length+1),reason:""});
+        // 넘치면 자르기
+        arr=arr.slice(0,subCount);
+        const newQs=arr.map((s,i)=>({
+          text:s.text||"",reason:s.reason||"",
+          link:data.questions[i]?.link||"",links:data.questions[i]?.links||[]
+        }));
+        set(p=>({...p,questions:newQs,subTopicCount:subCount}));
+      } else setErr("생성 실패. 다시 시도해주세요.");
     }catch(e){setErr("오류: "+e.message);}
     setLoading(false);
   };
@@ -1510,32 +1548,121 @@ JSON만 출력: {"sources":[{"title":"제목","url":"https://실제URL","type":"
     const q=data.questions[qIdx];if(!q?.text)return;
     const qs=[...data.questions];qs[qIdx]={...qs[qIdx],linksLoading:true};set(p=>({...p,questions:qs}));
     try{
-      const {sources}=await geminiSearch(`탐구 질문 관련 실제 한국어 자료 2-3개: "${q.text}" / 분야: ${data.field}
-JSON: {"sources":[{"title":"제목","url":"https://실제URL","type":"유형"}]}`);
+      const KOREAN_DOMAINS=["riss.kr","dbpia.co.kr","kiss.kstudy","academic.naver","kci.go.kr","ndsl.kr",
+        ".go.kr",".re.kr",".ac.kr","naver.com","daum.net","chosun.com","hani.co.kr","yonhapnews",
+        "yna.co.kr","khan.co.kr","donga.com","kbs.co.kr","mbc.co.kr","sbs.co.kr","edaily.co.kr",
+        "ohmynews.com","pressian.com","sisain.co.kr","mk.co.kr","hankyung.com","etnews.com"];
+      const isKo=(url)=>KOREAN_DOMAINS.some(d=>url.includes(d));
+
+      // Google Search grounding 호출 — JSON 요청 없이 자연어로
+      const prompt=`다음 탐구 소주제와 관련된 학술 자료, 기사, 보고서를 검색해주세요.
+
+소주제: ${q.text}
+탐구 주제: ${data.selectedTopic||""}
+분야: ${data.field}
+
+한국어 자료(RISS, DBpia, 네이버 학술, 국내 언론, 정부기관)를 우선으로 찾아주세요.`;
+
+      const {text, sources}=await geminiSearch(prompt);
+
       let links=[];
-      if(sources&&sources.length>0)links=sources.slice(0,3).map(s=>({url:s.url,title:s.title||q.text}));
-      const updated=[...data.questions];updated[qIdx]={...updated[qIdx],links,link:links[0]?.url||"",linksLoading:false};
+
+      // 1순위: grounding sources (실제 Google 검색 결과 URL)
+      if(sources&&sources.length>0){
+        const ko=sources.filter(s=>isKo(s.url||""));
+        const en=sources.filter(s=>!isKo(s.url||""));
+        const merged=[...ko.slice(0,3),...en.slice(0,enCount)];
+        links=merged.map(s=>({
+          url:s.url,
+          title:s.title||q.text+" 관련 자료"
+        }));
+      }
+
+      // 2순위: grounding 없으면 텍스트에서 URL 추출
+      if(links.length===0&&text){
+        const urlRegex=/https?:\/\/[^\s\)\]\}"'<>]+/g;
+        const found=(text.match(urlRegex)||[]).filter(u=>!u.includes("generativelanguage"));
+        const koUrls=found.filter(u=>isKo(u));
+        const enUrls=found.filter(u=>!isKo(u));
+        const merged=[...koUrls.slice(0,3),...enUrls.slice(0,enCount)];
+        links=merged.map(url=>({url,title:q.text+" 관련 자료"}));
+      }
+
+      // 3순위: 그래도 없으면 검색 URL 생성
+      if(links.length===0){
+        const kw=encodeURIComponent(q.text+" "+data.field);
+        links=[
+          {url:`https://www.riss.kr/search/Search.do?searchGubun=ALL&query=${kw}`,title:`[RISS] ${q.text} 관련 학술자료`},
+          {url:`https://academic.naver.com/search.naver?query=${kw}`,title:`[네이버학술] ${q.text} 관련 자료`},
+        ];
+        if(enCount>0) links.push({url:`https://scholar.google.com/scholar?q=${kw}`,title:`[Google Scholar] ${q.text}`});
+      }
+
+      const updated=[...data.questions];
+      updated[qIdx]={...updated[qIdx],links,link:links[0]?.url||"",linksLoading:false};
       set(p=>({...p,questions:updated}));
-    }catch(e){const updated=[...data.questions];updated[qIdx]={...updated[qIdx],linksLoading:false};set(p=>({...p,questions:updated}));}
+    }catch(e){
+      console.error("자료검색 오류:",e.message);
+      // 오류 시 기본 검색 URL 제공
+      const kw=encodeURIComponent((data.questions[qIdx]?.text||"")+" "+(data.field||""));
+      const fallbackLinks=[
+        {url:`https://www.riss.kr/search/Search.do?searchGubun=ALL&query=${kw}`,title:`[RISS] 관련 학술자료 검색`},
+        {url:`https://academic.naver.com/search.naver?query=${kw}`,title:`[네이버학술] 관련 자료 검색`},
+      ];
+      const updated=[...data.questions];
+      updated[qIdx]={...updated[qIdx],links:fallbackLinks,link:fallbackLinks[0]?.url||"",linksLoading:false};
+      set(p=>({...p,questions:updated}));
+    }
   };
 
+  const updLink=(i,li,field,v)=>{const q=[...data.questions];const links=[...(q[i].links||[])];links[li]={...links[li],[field]:v};q[i]={...q[i],links,link:links[0]?.url||""};set(p=>({...p,questions:q}));};
+  const addLink=(i)=>{const q=[...data.questions];q[i]={...q[i],links:[...(q[i].links||[]),{url:"",title:"직접 입력"}]};set(p=>({...p,questions:q}));};
+  const rmLink=(i,li)=>{const q=[...data.questions];const links=(q[i].links||[]).filter((_,idx)=>idx!==li);q[i]={...q[i],links,link:links[0]?.url||""};set(p=>({...p,questions:q}));};
+
   return <div className="fade">
-    <PH page={3} title="탐구 질문 구성" sub="관심 분야에서 궁금한 점을 질문으로 정리하세요. (최소 3개)"/>
-    <div className="btn-row">
-      <button className="btn btn-primary" onClick={aiGen} disabled={loading}>{loading?"생성 중...":"🤖 AI로 질문 + 참고자료 자동 생성"}</button>
-      <button className="btn btn-ghost" onClick={addQ}>+ 질문 추가</button>
+    <PH page={3} title="본론 소주제 구성" sub="탐구 본론의 소주제 수를 선택하고 AI가 추천하는 소주제를 확인·수정하세요."/>
+    <div className="info-box">
+      📋 선택된 주제: <strong>{data.selectedTopic||"아직 선택 안 됨"}</strong>
+      {!data.selectedTopic&&<span style={{color:"var(--warn)",marginLeft:8,fontSize:11}}>← 이전 페이지에서 먼저 주제를 선택하세요</span>}
     </div>
-    {loading&&<AILoad msg="질문 생성 후 각 질문별 실제 자료를 검색 중..." sub="약 20~30초 소요"/>}
+
+    <div className="sec-label">본론 소주제 수 선택</div>
+    <div className="vol-opts" style={{marginBottom:20}}>
+      {[2,3,4,5].map(n=>(
+        <button key={n} className={`vol-btn ${subCount===n?"sel":""}`} onClick={()=>changeSubCount(n)}>{n}개</button>
+      ))}
+    </div>
+
+    <div className="btn-row">
+      <button className="btn btn-primary" onClick={aiGenSubTopics} disabled={loading||!data.selectedTopic}>{loading?"생성 중...":"🤖 AI 소주제 자동 추천"}</button>
+      {data.questions.some(q=>q.text)&&<button className="btn btn-warn" onClick={aiGenSubTopics} disabled={loading||!data.selectedTopic}>🔄 다시 추천</button>}
+    </div>
+    {loading&&<AILoad msg="탐구 주제에 맞는 소주제를 생성 중..."/>}
     {err&&<div className="err-box">{err}</div>}
-    {data.questions.map((q,i)=>(
+
+    {(data.questions||[]).slice(0,subCount).map((q,i)=>(
       <div key={i} className="qcard fade">
-        <div className="qnum">QUESTION {String(i+1).padStart(2,"0")}</div>
-        {i>=3&&<button className="btn btn-danger" style={{position:"absolute",top:12,right:12,fontSize:11}} onClick={()=>rmQ(i)}>제거</button>}
-        <div className="fg"><label>질문</label><textarea rows={2} value={q.text} onChange={e=>updQ(i,"text",e.target.value)} placeholder="예: 인공지능은 의사의 진단 정확도를 얼마나 향상시킬 수 있는가?"/></div>
-        <div className="fg"><label>질문한 이유</label><textarea rows={2} value={q.reason} onChange={e=>updQ(i,"reason",e.target.value)} placeholder="이 질문을 갖게 된 배경이나 이유를 서술하세요."/></div>
+        <div className="qnum">소주제 {String(i+1).padStart(2,"0")}</div>
+        <div className="fg">
+          <label>소주제 제목 (본론 {i+1})</label>
+          <input type="text" placeholder="예: AI 의료 진단의 현황과 원리" value={q.text||""} onChange={e=>updQ(i,e.target.value)}/>
+        </div>
+        {q.reason&&<div style={{fontSize:12,color:"var(--text3)",background:"var(--surface2)",borderRadius:"var(--r)",padding:"8px 12px",marginBottom:10,lineHeight:1.6}}>💡 {q.reason}</div>}
         <div className="fg">
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-            <label>참고 자료 링크</label>
+            <label>참고 자료
+              <span style={{color:"var(--text3)",fontWeight:400,fontSize:10,marginLeft:6}}>
+                한국 자료 우선 · 해외
+                {[0,1,2].map(n=>(
+                  <span key={n} onClick={(e)=>{e.stopPropagation();setEnCount(n);}}
+                    style={{marginLeft:4,padding:"1px 6px",borderRadius:3,cursor:"pointer",fontSize:10,
+                      background:enCount===n?"var(--accent)":"var(--surface3)",
+                      color:enCount===n?"#fff":"var(--text3)"}}>
+                    {n}개
+                  </span>
+                ))}
+              </span>
+            </label>
             <div style={{display:"flex",gap:5}}>
               <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px",color:"var(--accent)",borderColor:"var(--accent)"}} onClick={()=>searchRefsForQ(i)} disabled={!q.text.trim()||q.linksLoading}>{q.linksLoading?"검색 중...":"🔍 AI 자료검색"}</button>
               <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>addLink(i)}>+ 직접 추가</button>
@@ -1557,12 +1684,12 @@ JSON: {"sources":[{"title":"제목","url":"https://실제URL","type":"유형"}]}
               ))}
             </div>
           ):(
-            <input type="text" placeholder="https://... (AI 자료검색 또는 직접 입력)" value={q.link||""} onChange={e=>updQ(i,"link",e.target.value)}/>
+            <input type="text" placeholder="https://... (AI 자료검색 또는 직접 입력)" value={q.link||""} onChange={e=>{const qs=[...data.questions];qs[i]={...qs[i],link:e.target.value};set(p=>({...p,questions:qs}));}}/>
           )}
         </div>
       </div>
     ))}
-    <NavRow page={2} onPrev={onPrev} onNext={onNext} nextDisabled={data.questions.filter(q=>q.text.trim()).length<3}/>
+    <NavRow page={3} onPrev={onPrev} onNext={onNext} nextDisabled={data.questions.filter(q=>q.text.trim()).length<2}/>
   </div>;
 }
 
@@ -1571,17 +1698,29 @@ function P4({data,set,onPrev,onNext}){
   const [err,setErr]=useState("");
   const [editIdx,setEditIdx]=useState(null);
   const [directInput,setDirectInput]=useState(data.selectedTopic&&!data.suggestedTopics?.find(t=>t.title===data.selectedTopic)?data.selectedTopic:"");
-  const LEVELS=[{key:"easy",label:"기초",desc:"개념 정의·비교 중심, 자료 조사형",color:"#22c55e"},{key:"mid",label:"심화",desc:"원인 분석·상관관계 탐구",color:"#f59e0b"},{key:"hard",label:"고급",desc:"실험·설계·비판적 분석 포함",color:"#ef4444"}];
+  const LEVELS=[
+    {key:"easy",label:"기초",desc:"개념 정의·비교·사례 조사형",color:"#22c55e"},
+    {key:"mid",label:"심화",desc:"원인 분석·상관관계 탐구",color:"#f59e0b"},
+    {key:"hard",label:"고급",desc:"실험·설계·비판적 분석",color:"#ef4444"}
+  ];
 
   const gen=async()=>{
     setLoading(true);setErr("");
-    const lvlDesc={easy:"개념 정의, 현황 조사, 사례 비교 수준의 기초적 탐구주제",mid:"원인 분석, 영향 관계, 상관관계를 다루는 심화 탐구주제",hard:"실험 설계, 모델 구축, 비판적 분석이 필요한 고급 탐구주제"};
+    const lvlDesc={
+      easy:"개념 정의, 현황 조사, 사례 비교 수준의 기초적 탐구주제",
+      mid:"원인 분석, 영향 관계, 상관관계를 다루는 심화 탐구주제",
+      hard:"실험 설계, 모델 구축, 비판적 분석이 필요한 고급 탐구주제"
+    };
+    const subCount=data.subTopicCount||3;
     try{
       const r=await geminiJSON(`고등학생 탐구보고서 주제 5개 추천.
-학년:${data.grade}/분야:${data.field}/세부관심:${data.interest}/키워드:${data.keywords.join(",")}/질문:${data.questions.map((q,i)=>i+1+"."+q.text).join("|")}
+학년:${data.grade} / 분야:${data.field} / 세부관심:${data.interest}
+키워드:${data.keywords.join(",")}
 난이도: ${lvlDesc[data.topicLevel||"mid"]}
+본론 소주제 수: ${subCount}개로 구성 가능한 주제
+조건: 고등학교 수준, 학생부 기록 적합, 탐구 가능
 JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
-      if(r?.topics)set(p=>({...p,suggestedTopics:r.topics,selectedTopic:""}));
+      if(r?.topics) set(p=>({...p,suggestedTopics:r.topics,selectedTopic:""}));
       else setErr("생성 실패. 다시 시도해주세요.");
     }catch(e){setErr("오류: "+e.message);}
     setLoading(false);
@@ -1591,8 +1730,17 @@ JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
   const applyDirect=(v)=>{setDirectInput(v);set(p=>({...p,selectedTopic:v}));};
   const applyEdit=(i,v)=>{const topics=[...(data.suggestedTopics||[])];topics[i]={...topics[i],title:v};set(p=>({...p,suggestedTopics:topics,selectedTopic:v}));setEditIdx(null);};
 
+  const changeSubCount=(n)=>{
+    set(p=>{
+      const cur=p.questions||[];
+      let newQ=n>cur.length?[...cur,...Array(n-cur.length).fill(null).map(()=>({text:"",reason:"",link:"",links:[]}))]:cur.slice(0,n);
+      return {...p,subTopicCount:n,questions:newQ};
+    });
+  };
+
   return <div className="fade">
-    <PH page={4} title="AI 탐구주제 추천" sub="난이도를 설정하고 AI가 추천하는 탐구주제를 선택하세요."/>
+    <PH page={4} title="AI 탐구주제 추천" sub="난이도와 소주제 수를 설정하고 AI가 추천하는 탐구주제를 선택하세요."/>
+
     <div className="sec-label">탐구 난이도 설정</div>
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap"}}>
       {LEVELS.map(lv=>(
@@ -1603,18 +1751,26 @@ JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
         </div>
       ))}
     </div>
+
+    <div className="sec-label">본론 소주제 수 설정</div>
+    <div className="vol-opts" style={{marginBottom:20}}>
+      {[2,3,4,5].map(n=>(
+        <button key={n} className={`vol-btn ${(data.subTopicCount||3)===n?"sel":""}`} onClick={()=>changeSubCount(n)}>{n}개</button>
+      ))}
+    </div>
+
     <div className="btn-row">
       <button className="btn btn-primary" onClick={gen} disabled={loading}>{loading?"생성 중...":data.suggestedTopics?.length?"🔄 다시 추천":"✨ AI 주제 추천"}</button>
     </div>
     {loading&&<AILoad msg="최적의 탐구주제를 분석 중..."/>}
     {err&&<div className="err-box">{err}</div>}
+
     {data.suggestedTopics?.map((t,i)=>(
       <div key={i} className={`topic-card ${data.selectedTopic===t.title?"sel":""}`} onClick={()=>editIdx===i?null:selectTopic(t.title)}>
         {data.selectedTopic===t.title&&editIdx!==i&&<div className="topic-check">✓</div>}
         {editIdx===i?(
           <div onClick={e=>e.stopPropagation()}>
-            <input type="text" defaultValue={t.title} id={`et-${i}`} style={{width:"100%",marginBottom:8,fontWeight:600}}
-              onKeyDown={e=>e.key==="Enter"&&applyEdit(i,e.target.value)}/>
+            <input type="text" defaultValue={t.title} id={`et-${i}`} style={{width:"100%",marginBottom:8,fontWeight:600}} onKeyDown={e=>e.key==="Enter"&&applyEdit(i,e.target.value)}/>
             <div style={{display:"flex",gap:7}}>
               <button className="btn btn-primary" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>applyEdit(i,document.getElementById(`et-${i}`).value)}>확인</button>
               <button className="btn btn-ghost" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>setEditIdx(null)}>취소</button>
@@ -1631,12 +1787,20 @@ JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
         )}
       </div>
     ))}
+
     <div className="divider"/>
-    <div className="fg"><label>직접 주제 작성</label>
+    <div className="fg">
+      <label>직접 주제 작성</label>
       <input type="text" placeholder="원하는 탐구주제를 직접 입력하세요" value={directInput} onChange={e=>applyDirect(e.target.value)}/>
       {directInput&&<div style={{fontSize:11,color:"var(--success)",marginTop:4}}>✓ 직접 입력한 주제가 선택되었습니다.</div>}
     </div>
-    {data.selectedTopic&&<div className="info-box">✅ 선택된 주제: <strong>{data.selectedTopic}</strong></div>}
+
+    {data.selectedTopic&&<div className="info-box">
+      ✅ 선택된 주제: <strong>{data.selectedTopic}</strong>
+      <span style={{marginLeft:8,fontSize:11,color:"var(--text3)"}}>
+        [{LEVELS.find(l=>l.key===data.topicLevel)?.label||""}] / 소주제 {data.subTopicCount||3}개
+      </span>
+    </div>}
     <NavRow page={3} onPrev={onPrev} onNext={onNext} nextDisabled={!data.selectedTopic}/>
   </div>;
 }
@@ -1885,7 +2049,7 @@ function P9({data,set,onPrev,onNext}){
 본론요약:${bodyText.slice(0,800)}
 참고링크:${links.join(", ")}
 기준: 탐구요약500~700자/알게된점300~500자/향상된역량200~300자/추가탐구목표200자내외
-참고문헌:신뢰가능한링크만APA형식/관련도서3~5권
+참고문헌: 링크 중 신뢰 가능한 것만 APA형식(한국어자료우선,해외1개이내)/관련도서3~5권(국내도서우선)
 JSON:{"summary":"내용","learned":"내용","skills":"내용","future":"내용","refs":["APA1","APA2"],"books":["도서1","도서2"]}`);
       if(r)set(p=>({...p,conclusion:{...p.conclusion,...r}}));
     }catch(e){}
@@ -2201,7 +2365,7 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
 }
 
 // ─── P13: 말투 변환 & 최종 출력 ──────────────────────────────────────────
-function P13({data,set,onPrev}){
+function P13({data,set,onPrev,onFinish}){
   const [style,setStyle]=useState("");
   const [loading,setLoading]=useState(false);
   const [progress,setProgress]=useState("");
@@ -2442,7 +2606,7 @@ ${(d.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-top:
 
     <div className="nav-row">
       <button className="btn btn-secondary" onClick={onPrev}>← 이전</button>
-      <button className="btn btn-success" onClick={()=>alert("🎉 탐구보고서가 완성되었습니다!")}>✅ 완료</button>
+      <button className="btn btn-success" onClick={()=>{if(onFinish){onFinish();}else{alert("🎉 탐구보고서가 완성되었습니다!");}}}>✅ 완료 & 홈으로</button>
     </div>
   </div>;
 }
@@ -2454,8 +2618,7 @@ ${(d.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-top:
 function App(){
   const [user,setUser]=useState(null);
   const [checking,setChecking]=useState(true);
-  // screen: "coin_check" | "report_home" | "writing"
-  const [screen,setScreen]=useState("coin_check");
+  const [screen,setScreen]=useState("home");
   const [newReportId,setNewReportId]=useState(null);
   const [loadData,setLoadData]=useState(null);
   const [loadReportId,setLoadReportId]=useState(null);
@@ -2468,8 +2631,34 @@ function App(){
           try{
             const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
             if(snap.exists()){
-              setUser({uid:fbUser.uid,...snap.data()});
-              setScreen("coin_check");
+              const userData={uid:fbUser.uid,...snap.data()};
+              setUser(userData);
+
+              // ── 핵심: 진행 중인 세션 확인 ──────────────────────────────
+              // activeSession이 Firestore에 있으면 → 코인 없이 해당 세션 복구
+              if(userData.activeSession?.reportId && userData.activeSession?.active){
+                const sess=userData.activeSession;
+                // 세션이 24시간 이내인지 확인
+                const sessTime=sess.startedAt?.toMillis?.()|| new Date(sess.startedAt||0).getTime();
+                const isValid=(Date.now()-sessTime)<24*60*60*1000;
+                if(isValid){
+                  // Firestore에서 해당 보고서 데이터 불러오기
+                  try{
+                    const {doc:fbDoc,getDoc:fbGet}=window._fbFns;
+                    const rpSnap=await fbGet(fbDoc(window._fbDb,"reports",sess.reportId));
+                    if(rpSnap.exists()){
+                      setLoadData(rpSnap.data().data||null);
+                      setLoadReportId(sess.reportId);
+                      setScreen("writing");
+                      setChecking(false);
+                      return;
+                    }
+                  }catch(e){console.warn("세션 보고서 로드 실패:",e.message);}
+                }
+                // 만료됐으면 세션 초기화
+                clearSession(fbUser.uid);
+              }
+              setScreen("home");
             }else setUser(false);
           }catch(e){setUser(false);}
         }else setUser(false);
@@ -2478,21 +2667,73 @@ function App(){
     });
   },[]);
 
-  const handleLogin=(userData)=>{ setUser(userData); setScreen("coin_check"); };
+  // Firestore에 activeSession 기록 (코인 차감 시 호출)
+  const recordSession=async(uid,reportId)=>{
+    try{
+      await waitFb();
+      const {doc,updateDoc,serverTimestamp}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"users",uid),{
+        activeSession:{reportId,active:true,startedAt:serverTimestamp()}
+      });
+    }catch(e){console.warn("세션 기록 실패:",e.message);}
+  };
+
+  // 세션 종료 (완료/홈으로 나갈 때)
+  const clearSession=async(uid)=>{
+    try{
+      await waitFb();
+      const {doc,updateDoc}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"users",uid||user?.uid),{
+        activeSession:{active:false}
+      });
+    }catch(e){console.warn("세션 초기화 실패:",e.message);}
+  };
+
+  const handleLogin=async(userData)=>{
+    setUser(userData);
+    // 로그인 시 진행 중 세션 확인
+    if(userData.activeSession?.reportId && userData.activeSession?.active){
+      const sess=userData.activeSession;
+      const sessTime=sess.startedAt?.toMillis?.()|| new Date(sess.startedAt||0).getTime();
+      const isValid=(Date.now()-sessTime)<24*60*60*1000;
+      if(isValid){
+        try{
+          const {doc,getDoc}=window._fbFns;
+          const rpSnap=await getDoc(doc(window._fbDb,"reports",sess.reportId));
+          if(rpSnap.exists()){
+            setLoadData(rpSnap.data().data||null);
+            setLoadReportId(sess.reportId);
+            setNewReportId(null);
+            setScreen("writing");
+            return;
+          }
+        }catch(e){}
+        clearSession(userData.uid);
+      }
+    }
+    setScreen("home");
+  };
 
   const handleLogout=async()=>{
     await waitFb();
     const {signOut}=window._fbFns;
+    // 로그아웃 시 세션 초기화
+    await clearSession(user?.uid);
     await signOut(window._fbAuth);
-    setUser(false);setScreen("coin_check");setNewReportId(null);setLoadData(null);setLoadReportId(null);
+    setUser(false);setScreen("home");
+    setNewReportId(null);setLoadData(null);setLoadReportId(null);
   };
 
   const handleCoinConfirm=async()=>{
     try{
       await waitFb();
-      const {doc,updateDoc,increment}=window._fbFns;
-      await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
+      const {doc,updateDoc,increment,serverTimestamp}=window._fbFns;
       const id=user.uid+"_"+Date.now();
+      // 코인 차감 + activeSession 동시 기록
+      await updateDoc(doc(window._fbDb,"users",user.uid),{
+        coins:increment(-1),
+        activeSession:{reportId:id,active:true,startedAt:serverTimestamp()}
+      });
       setUser(p=>({...p,coins:(p.coins||1)-1}));
       setNewReportId(id);
       setLoadData(null);setLoadReportId(null);
@@ -2500,11 +2741,18 @@ function App(){
     }catch(e){alert("코인 차감 오류: "+e.message);}
   };
 
-  // 기존 보고서 불러오기 (코인 차감 없음)
+  // 기존 보고서 불러오기 (코인 차감 없음 — 세션도 기록하지 않음)
   const handleLoadReport=(d,id)=>{
     setLoadData(d);setLoadReportId(id);
     setNewReportId(null);
     setScreen("writing");
+  };
+
+  // 보고서 작성 완료 → 홈으로 (세션 종료)
+  const handleFinish=async()=>{
+    await clearSession(user?.uid);
+    setScreen("home");
+    setNewReportId(null);setLoadData(null);setLoadReportId(null);
   };
 
   if(checking){
@@ -2522,18 +2770,19 @@ function App(){
       onCoinUpdate={(c)=>setUser(p=>({...p,coins:c}))}
       initData={loadData}
       initReportId={loadReportId||newReportId}
+      onFinish={handleFinish}
+      onGoHome={handleFinish}
     />;
   }
 
-  // coin_check 화면 — 새 보고서 시작 or 기존 보고서 목록
   return <ReportHomeScreen
     user={user}
     onLogout={handleLogout}
-    onNewReport={()=>{ /* 코인 체크 모달 */ setScreen("show_coin"); }}
+    onNewReport={()=>setScreen("show_coin")}
     onLoadReport={handleLoadReport}
     showCoin={screen==="show_coin"}
     onCoinConfirm={handleCoinConfirm}
-    onCoinCancel={()=>setScreen("coin_check")}
+    onCoinCancel={()=>setScreen("home")}
   />;
 }
 
