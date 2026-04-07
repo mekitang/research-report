@@ -7,31 +7,18 @@
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script type="module" id="firebase-init">
-// Firebase SDK
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, getDocs, addDoc, query, where, orderBy, serverTimestamp, increment }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
-const firebaseConfig = {
-  apiKey: "AIzaSyB36Zz-7cyQ5AeIWxpTzVHhWicp5aW6dn4",
-  authDomain: "research-report-aec4d.firebaseapp.com",
-  projectId: "research-report-aec4d",
-  storageBucket: "research-report-aec4d.firebasestorage.app",
-  messagingSenderId: "39307211816",
-  appId: "1:39307211816:web:f1559bf92be1df4861b11d"
-};
-
-const app = initializeApp(firebaseConfig);
-window._fbAuth = getAuth(app);
-window._fbDb  = getFirestore(app);
-window._fbFns = { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged,
-  doc, getDoc, setDoc, updateDoc, collection, getDocs, addDoc, query, where, orderBy, serverTimestamp, increment };
-window._fbReady = true;
+<script type="module">
+import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import{getAuth,signInWithEmailAndPassword,createUserWithEmailAndPassword,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import{getFirestore,doc,getDoc,setDoc,updateDoc,deleteDoc,collection,getDocs,addDoc,query,where,orderBy,serverTimestamp,increment}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+const app=initializeApp({apiKey:"AIzaSyB36Zz-7cyQ5AeIWxpTzVHhWicp5aW6dn4",authDomain:"research-report-aec4d.firebaseapp.com",projectId:"research-report-aec4d",storageBucket:"research-report-aec4d.firebasestorage.app",messagingSenderId:"39307211816",appId:"1:39307211816:web:f1559bf92be1df4861b11d"});
+window._fbAuth=getAuth(app);
+window._fbDb=getFirestore(app);
+window._fbFns={signInWithEmailAndPassword,createUserWithEmailAndPassword,signOut,onAuthStateChanged,doc,getDoc,setDoc,updateDoc,deleteDoc,collection,getDocs,addDoc,query,where,orderBy,serverTimestamp,increment};
+window._fbReady=true;
 window.dispatchEvent(new Event("firebase-ready"));
 </script>
+
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -372,7 +359,10 @@ const INIT={
   selfEval:{motivation:"",process:"",skills:"",learned:"",future:""},
   correctedEval:{},
   styledReport:null,
-  styledReportStyle:""
+  styledReportStyle:"",
+  subjectName:"",
+  subjectUnit:"",
+  subjectKeywords:[]
 };
 
 // ─── Shared UI ────────────────────────────────────────────────────────────
@@ -768,6 +758,182 @@ function SaveModal({onClose,data,user,onLoad,reportId,onReportIdSet}){
 // ════════════════════════════════════════════════════════════════════════════
 // ─── ADMIN SCREEN ──────────────────────────────────────────════════════════
 // ════════════════════════════════════════════════════════════════════════════
+// ─── Rubric Manager (평가기준 PDF 업로드 & 관리) ──────────────────────────
+function RubricManager(){
+  const [rubrics,setRubrics]=useState([]);
+  const [loading,setLoading]=useState(false);
+  const [uploading,setUploading]=useState(false);
+  const [msg,setMsg]=useState("");
+  const [subjectName,setSubjectName]=useState("");
+  const fileRef=useRef();
+
+  useEffect(()=>{ loadRubrics(); },[]);
+
+  const loadRubrics=async()=>{
+    setLoading(true);
+    try{
+      await waitFb();
+      const {collection,getDocs}=window._fbFns;
+      const snap=await getDocs(collection(window._fbDb,"rubrics"));
+      const list=snap.docs.map(d=>({id:d.id,...d.data()}));
+      list.sort((a,b)=>(a.subject||"").localeCompare(b.subject||""));
+      setRubrics(list);
+    }catch(e){console.error(e);}
+    setLoading(false);
+  };
+
+  const uploadPDF=async(file)=>{
+    if(!file||!file.type.includes("pdf")){setMsg("❌ PDF 파일만 업로드 가능합니다.");return;}
+    if(!subjectName.trim()){setMsg("❌ 과목명을 먼저 입력하세요.");return;}
+    setUploading(true);setMsg("");
+    try{
+      // PDF → base64 변환 후 Gemini로 텍스트 추출
+      const base64=await new Promise((res,rej)=>{
+        const r=new FileReader();
+        r.onload=()=>res(r.result.split(",")[1]);
+        r.onerror=rej;
+        r.readAsDataURL(file);
+      });
+
+      // Gemini Vision으로 PDF 텍스트 추출
+      await waitFb();
+      const {doc,getDoc}=window._fbFns;
+      const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
+      const key=snap.exists()?snap.data().apiKey:GEMINI_KEY;
+      if(!key){setMsg("❌ Gemini API 키가 설정되지 않았습니다.");setUploading(false);return;}
+
+      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-goog-api-key":key},
+        body:JSON.stringify({
+          contents:[{parts:[
+            {inline_data:{mime_type:"application/pdf",data:base64}},
+            {text:`이 PDF는 고등학교 "${subjectName}" 과목의 평가기준표입니다.
+다음 형식으로 추출해주세요:
+1. 과목명
+2. 단원/영역 목록 (모두 나열)
+3. 핵심 키워드 목록 (평가요소, 성취기준 키워드)
+4. 평가기준 요약
+
+JSON으로만 반환:
+{"subject":"과목명","units":["단원1","단원2"],"keywords":["키워드1","키워드2"],"summary":"평가기준 요약"}`
+          ],role:"user"}],
+          generationConfig:{temperature:0.2,maxOutputTokens:4096}
+        })
+      });
+
+      if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
+      const d=await res.json();
+      const raw=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
+      const cleaned=raw.replace(/```json|```/g,"").trim();
+      let parsed;
+      try{parsed=JSON.parse(cleaned);}
+      catch{parsed={subject:subjectName,units:[],keywords:[],summary:raw.slice(0,500)};}
+
+      // Firestore에 저장
+      const {doc:fbDoc,setDoc:fbSet,serverTimestamp}=window._fbFns;
+      const id="rubric_"+subjectName.replace(/\s/g,"_")+"_"+Date.now();
+      await fbSet(fbDoc(window._fbDb,"rubrics",id),{
+        subject:subjectName,
+        filename:file.name,
+        units:parsed.units||[],
+        keywords:parsed.keywords||[],
+        summary:parsed.summary||"",
+        uploadedAt:serverTimestamp()
+      });
+
+      setMsg(`✅ "${subjectName}" 평가기준이 등록되었습니다! (단원 ${(parsed.units||[]).length}개, 키워드 ${(parsed.keywords||[]).length}개 추출)`);
+      setSubjectName("");
+      loadRubrics();
+    }catch(e){setMsg("❌ 오류: "+e.message);}
+    setUploading(false);
+  };
+
+  const deleteRubric=async(id,subject)=>{
+    if(!window.confirm(`"${subject}" 평가기준을 삭제하시겠습니까?`))return;
+    try{
+      await waitFb();
+      // Firestore doc 삭제 (실제 삭제)
+      const {doc,deleteDoc}=window._fbFns;
+      if(doc&&deleteDoc){
+        await deleteDoc(doc(window._fbDb,"rubrics",id));
+      }else{
+        // deleteDoc 없으면 비활성화
+        const {doc:fbDoc,updateDoc}=window._fbFns;
+        await updateDoc(fbDoc(window._fbDb,"rubrics",id),{deleted:true});
+      }
+      setRubrics(prev=>prev.filter(r=>r.id!==id));
+    }catch(e){alert("삭제 실패: "+e.message);}
+  };
+
+  return <div className="fade">
+    <div style={{marginBottom:28}}>
+      <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>📚 평가기준 관리</div>
+      <div style={{fontSize:13,color:"var(--text3)"}}>과목별 평가기준 PDF를 업로드하면 AI가 단원·키워드를 추출합니다. 학생들이 탐구주제 선정 시 과목 연계를 추천받을 수 있습니다.</div>
+    </div>
+
+    {/* 업로드 영역 */}
+    <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"20px",marginBottom:20}}>
+      <div className="sec-label" style={{marginBottom:12}}>새 평가기준 PDF 업로드</div>
+      <div className="fg"><label>과목명 *</label>
+        <input type="text" placeholder="예: 생명과학Ⅱ, 물리학Ⅰ, 사회문화..." value={subjectName} onChange={e=>setSubjectName(e.target.value)}/>
+      </div>
+      <div style={{background:"var(--surface)",border:"2px dashed var(--border2)",borderRadius:"var(--r2)",padding:"24px",textAlign:"center",cursor:"pointer",marginBottom:12}}
+        onClick={()=>fileRef.current?.click()}
+        onDragOver={e=>e.preventDefault()}
+        onDrop={e=>{e.preventDefault();uploadPDF(e.dataTransfer.files[0]);}}>
+        <div style={{fontSize:28,marginBottom:6}}>📄</div>
+        <div style={{fontSize:13,color:"var(--text2)"}}>클릭하거나 PDF 파일을 드래그하여 업로드</div>
+        <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>PDF 파일만 지원 · AI가 자동으로 텍스트와 키워드 추출</div>
+      </div>
+      <input ref={fileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={e=>{if(e.target.files[0])uploadPDF(e.target.files[0]);e.target.value="";}}/>
+      {uploading&&<AILoad msg="PDF에서 텍스트·단원·키워드 추출 중..." sub="Gemini AI가 평가기준을 분석합니다..."/>}
+      {msg&&<div style={{fontSize:13,color:msg.startsWith("✅")?"var(--success)":"var(--danger)",marginTop:8}}>{msg}</div>}
+    </div>
+
+    {/* 등록된 평가기준 목록 */}
+    <div className="sec-label">등록된 평가기준 ({rubrics.filter(r=>!r.deleted).length}개)</div>
+    {loading&&<AILoad msg="불러오는 중..."/>}
+    {!loading&&rubrics.filter(r=>!r.deleted).length===0&&(
+      <div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"24px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)"}}>
+        등록된 평가기준이 없습니다. PDF를 업로드해주세요.
+      </div>
+    )}
+    {rubrics.filter(r=>!r.deleted).map(r=>(
+      <div key={r.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px",marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+          <div>
+            <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{r.subject}</div>
+            <div style={{fontSize:11,color:"var(--text3)",marginTop:3,fontFamily:"var(--mono)"}}>{r.filename} · {r.uploadedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}</div>
+          </div>
+          <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}} onClick={()=>deleteRubric(r.id,r.subject)}>삭제</button>
+        </div>
+        {r.units?.length>0&&(
+          <div style={{marginBottom:8}}>
+            <div style={{fontSize:11,color:"var(--accent)",fontFamily:"var(--mono)",letterSpacing:1,marginBottom:4}}>단원/영역</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {r.units.slice(0,8).map((u,i)=><span key={i} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",borderRadius:4,padding:"2px 8px",fontSize:11,color:"var(--text2)"}}>{u}</span>)}
+              {r.units.length>8&&<span style={{fontSize:11,color:"var(--text3)"}}>+{r.units.length-8}개</span>}
+            </div>
+          </div>
+        )}
+        {r.keywords?.length>0&&(
+          <div>
+            <div style={{fontSize:11,color:"var(--success)",fontFamily:"var(--mono)",letterSpacing:1,marginBottom:4}}>키워드</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {r.keywords.slice(0,10).map((k,i)=><span key={i} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:4,padding:"2px 8px",fontSize:11,color:"var(--text2)"}}>{k}</span>)}
+              {r.keywords.length>10&&<span style={{fontSize:11,color:"var(--text3)"}}>+{r.keywords.length-10}개</span>}
+            </div>
+          </div>
+        )}
+        {r.summary&&(
+          <div style={{marginTop:8,fontSize:12,color:"var(--text3)",lineHeight:1.6,background:"var(--surface2)",borderRadius:"var(--r)",padding:"8px 10px"}}>{r.summary.slice(0,200)}{r.summary.length>200?"...":""}</div>
+        )}
+      </div>
+    ))}
+  </div>;
+}
+
 // ─── API Key Manager ──────────────────────────────────────────────────────
 function ApiKeyManager(){
   const [key,setKey]=useState("");
@@ -979,6 +1145,7 @@ function AdminScreen({user,onLogout}){
     {id:"coins",icon:"🪙",label:"코인 지급"},
     {id:"reports",icon:"📄",label:"보고서 관리"},
     {id:"create",icon:"➕",label:"계정 생성"},
+    {id:"rubric",icon:"📚",label:"평가기준 관리"},
     {id:"apikey",icon:"🔑",label:"AI 키 관리"}
   ];
 
@@ -1204,6 +1371,9 @@ function AdminScreen({user,onLogout}){
           {loading?"생성 중...":"✅ 학생 계정 생성"}
         </button>
       </div>}
+
+      {/* ── Rubric ── */}
+      {tab==="rubric"&&<RubricManager/>}
 
       {/* ── API Key ── */}
       {tab==="apikey"&&<ApiKeyManager/>}
@@ -1578,19 +1748,93 @@ function P1({data,set,user,onNext}){
 
 function P2({data,set,onPrev,onNext}){
   const [kw,setKw]=useState("");
+  const [subjectInput,setSubjectInput]=useState(data.subjectName||"");
+  const [loadingSubject,setLoadingSubject]=useState(false);
+  const [rubricSuggestions,setRubricSuggestions]=useState(null); // {subject,units,keywords,matchScore}[]
+  const [loadingRubric,setLoadingRubric]=useState(false);
+  const [showRubricPanel,setShowRubricPanel]=useState(false);
+
   const FIELDS=["자연과학","생명과학·의학","공학·기술","수학·통계","사회과학","인문학","예술·문화","경제·경영","환경·지구과학","심리학·교육학"];
   const addKw=()=>{const v=kw.trim();if(v&&!data.keywords.includes(v))set(p=>({...p,keywords:[...p.keywords,v]}));setKw("");};
+  const addKwItem=(k)=>{if(k&&!data.keywords.includes(k))set(p=>({...p,keywords:[...p.keywords,k]}));};
+
+  // ── 과목명 입력 시 AI로 관련 단원·키워드 추천 ──────────────────────────
+  const fetchSubjectInfo=async()=>{
+    const subj=subjectInput.trim();
+    if(!subj)return;
+    setLoadingSubject(true);
+    set(p=>({...p,subjectName:subj}));
+    try{
+      const r=await geminiJSON(`고등학교 "${subj}" 과목의 주요 단원과 탐구보고서에 활용할 수 있는 핵심 키워드를 추천해주세요.
+학생의 관심 분야: ${data.field||"미입력"}
+학생이 입력한 키워드: ${data.keywords.join(", ")||"없음"}
+
+JSON만 반환:
+{"units":["단원1","단원2","단원3","단원4","단원5"],"keywords":["키워드1","키워드2","키워드3","키워드4","키워드5","키워드6","키워드7","키워드8"],"relatedFields":["관련분야1","관련분야2"]}`);
+      if(r){
+        set(p=>({...p,subjectUnit:r.units?.[0]||"",subjectKeywords:r.keywords||[]}));
+        setRubricSuggestions([{subject:subj,units:r.units||[],keywords:r.keywords||[],relatedFields:r.relatedFields||[],fromAI:true}]);
+        setShowRubricPanel(true);
+      }
+    }catch(e){console.error(e);}
+    setLoadingSubject(false);
+  };
+
+  // ── Firestore 평가기준에서 키워드 매칭 추천 ─────────────────────────────
+  const fetchRubricMatch=async()=>{
+    if(!data.keywords.length&&!data.field&&!data.interest){
+      alert("먼저 관심 분야와 키워드를 입력하세요.");return;
+    }
+    setLoadingRubric(true);
+    try{
+      await waitFb();
+      const {collection,getDocs}=window._fbFns;
+      const snap=await getDocs(collection(window._fbDb,"rubrics"));
+      const rubrics=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.deleted);
+
+      if(rubrics.length===0){
+        alert("등록된 평가기준이 없습니다. 관리자에게 문의하세요.");
+        setLoadingRubric(false);return;
+      }
+
+      // AI로 매칭 분석
+      const rubricSummary=rubrics.map(r=>`과목:${r.subject} / 단원:${(r.units||[]).join(",")} / 키워드:${(r.keywords||[]).join(",")}`).join("
+");
+      const r=await geminiJSON(`학생의 관심 분야와 키워드에 가장 잘 맞는 과목과 단원을 추천해주세요.
+
+학생 정보:
+- 관심 분야: ${data.field||"미입력"}
+- 세부 관심: ${data.interest||"미입력"}
+- 키워드: ${data.keywords.join(", ")||"없음"}
+
+등록된 평가기준:
+${rubricSummary}
+
+JSON으로만 반환 (연관성 높은 순서로):
+{"matches":[{"subject":"과목명","units":["관련단원1","관련단원2"],"keywords":["관련키워드1","관련키워드2"],"reason":"추천 이유 1문장","score":95}]}`);
+
+      if(r?.matches){
+        setRubricSuggestions(r.matches.slice(0,3));
+        setShowRubricPanel(true);
+      }
+    }catch(e){console.error(e);}
+    setLoadingRubric(false);
+  };
+
   return <div className="fade">
     <PH page={2} title="관심 분야 & 키워드" sub="관심 분야와 핵심 키워드를 입력하세요."/>
+
     <div className="fg"><label>관심 분야</label>
       <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
         {FIELDS.map(f=><button key={f} className={`vol-btn ${data.field===f?"sel":""}`} onClick={()=>set(p=>({...p,field:f}))}>{f}</button>)}
       </div>
       <input type="text" placeholder="직접 입력..." value={data.field} onChange={e=>set(p=>({...p,field:e.target.value}))}/>
     </div>
+
     <div className="fg"><label>세부 관심 주제</label>
       <textarea rows={3} value={data.interest} onChange={e=>set(p=>({...p,interest:e.target.value}))} placeholder="예: 인공지능이 의료 진단에 미치는 영향에 관심이 있습니다..."/>
     </div>
+
     <div className="fg"><label>키워드</label>
       <div className="tag-row">
         <input type="text" placeholder="키워드 입력 후 Enter" value={kw} onChange={e=>setKw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addKw()}/>
@@ -1601,9 +1845,117 @@ function P2({data,set,onPrev,onNext}){
         {data.keywords.map(k=><span key={k} className="tag">{k}<span className="rm" onClick={()=>set(p=>({...p,keywords:p.keywords.filter(x=>x!==k)}))}>×</span></span>)}
       </div>
     </div>
+
+    <div className="divider"/>
+
+    {/* ── 과목 연계 섹션 ── */}
+    <div className="sec-label">과목 연계 추천</div>
+
+    {/* 방법 1: 키워드 기반 평가기준 매칭 */}
+    <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px",marginBottom:12}}>
+      <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:6}}>📚 평가기준 기반 과목 추천</div>
+      <div style={{fontSize:12,color:"var(--text3)",marginBottom:10}}>관리자가 등록한 평가기준표를 바탕으로 내 키워드와 가장 연관성 높은 과목과 단원을 추천합니다.</div>
+      <button className="btn btn-primary" style={{fontSize:12}} onClick={fetchRubricMatch} disabled={loadingRubric}>
+        {loadingRubric?"분석 중...":"🔍 평가기준 연계 분석"}
+      </button>
+      {loadingRubric&&<AILoad msg="키워드와 평가기준을 매칭 중..."/>}
+    </div>
+
+    {/* 방법 2: 과목명 직접 입력 */}
+    <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px",marginBottom:12}}>
+      <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:6}}>✏️ 과목명 직접 입력</div>
+      <div style={{fontSize:12,color:"var(--text3)",marginBottom:10}}>과목명을 입력하면 AI가 관련 단원과 키워드를 추천합니다.</div>
+      <div style={{display:"flex",gap:8}}>
+        <input type="text" placeholder="예: 생명과학Ⅱ, 물리학Ⅰ..." value={subjectInput}
+          onChange={e=>setSubjectInput(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&fetchSubjectInfo()}
+          style={{flex:1}}/>
+        <button className="btn btn-primary" style={{fontSize:12,flexShrink:0}} onClick={fetchSubjectInfo} disabled={loadingSubject||!subjectInput.trim()}>
+          {loadingSubject?"분석 중...":"🤖 분석"}
+        </button>
+      </div>
+      {loadingSubject&&<AILoad msg="과목 단원 및 키워드 분석 중..."/>}
+    </div>
+
+    {/* 추천 결과 */}
+    {showRubricPanel&&rubricSuggestions&&rubricSuggestions.length>0&&(
+      <div style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"16px",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:13,fontWeight:600,color:"var(--accent)"}}>✅ 연계 추천 결과</div>
+          <button className="btn btn-ghost" style={{fontSize:11,padding:"3px 8px"}} onClick={()=>setShowRubricPanel(false)}>닫기</button>
+        </div>
+        {rubricSuggestions.map((s,i)=>(
+          <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r)",padding:"14px",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{s.subject}</div>
+              {s.score&&<span style={{fontSize:11,fontFamily:"var(--mono)",color:"var(--success)",background:"rgba(34,197,94,0.1)",padding:"2px 8px",borderRadius:4}}>연관도 {s.score}%</span>}
+            </div>
+            {s.reason&&<div style={{fontSize:12,color:"var(--text3)",marginBottom:8}}>{s.reason}</div>}
+
+            {s.units&&s.units.length>0&&(
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>관련 단원</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {s.units.map((u,j)=>(
+                    <span key={j} style={{background:"var(--surface2)",border:"1px solid var(--border2)",borderRadius:4,padding:"3px 9px",fontSize:12,color:"var(--text2)",cursor:"pointer"}}
+                      onClick={()=>set(p=>({...p,subjectName:s.subject,subjectUnit:u}))}
+                      title="클릭하여 선택">
+                      {u}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {s.keywords&&s.keywords.length>0&&(
+              <div>
+                <div style={{fontSize:11,color:"var(--text3)",marginBottom:4}}>추천 키워드 <span style={{color:"var(--accent)"}}>(클릭하여 추가)</span></div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {s.keywords.map((k,j)=>{
+                    const already=data.keywords.includes(k);
+                    return <span key={j}
+                      style={{background:already?"var(--accent-dim)":"var(--surface2)",
+                        border:`1px solid ${already?"var(--accent)":"var(--border2)"}`,
+                        borderRadius:4,padding:"3px 9px",fontSize:12,
+                        color:already?"var(--accent)":"var(--text2)",
+                        cursor:already?"default":"pointer"}}
+                      onClick={()=>!already&&addKwItem(k)}
+                      title={already?"이미 추가됨":"클릭하여 키워드 추가"}>
+                      {already?"✓ ":""}{k}
+                    </span>;
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* 선택된 과목/단원 표시 */}
+            {data.subjectName===s.subject&&data.subjectUnit&&(
+              <div style={{marginTop:8,fontSize:12,color:"var(--success)"}}>
+                ✅ 선택됨: {data.subjectName} — {data.subjectUnit}
+              </div>
+            )}
+          </div>
+        ))}
+        <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>* 단원 클릭 시 선택, 키워드 클릭 시 내 키워드에 추가됩니다.</div>
+      </div>
+    )}
+
+    {/* 선택된 과목/단원 요약 */}
+    {data.subjectName&&(
+      <div className="info-box">
+        📚 연계 과목: <strong>{data.subjectName}</strong>
+        {data.subjectUnit&&<> — <strong>{data.subjectUnit}</strong></>}
+        <button className="btn btn-ghost" style={{marginLeft:10,fontSize:10,padding:"2px 7px"}}
+          onClick={()=>set(p=>({...p,subjectName:"",subjectUnit:"",subjectKeywords:[]}))}>
+          ✕ 해제
+        </button>
+      </div>
+    )}
+
     <NavRow page={1} onPrev={onPrev} onNext={onNext} nextDisabled={!data.field||!data.interest}/>
   </div>;
 }
+
 
 function P3({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
@@ -2935,7 +3287,3 @@ function App(){
   />;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
-</script>
-</body>
-</html>
