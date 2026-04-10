@@ -3917,7 +3917,6 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
   // 자동저장
   const autoSave=async(currentData,currentReportId)=>{
     if(!currentReportId) return;
-    if(user.role==="guest") return; // 비회원은 저장 안함
     try{
       await waitFb();
       const {doc,setDoc,serverTimestamp}=window._fbFns;
@@ -3990,14 +3989,13 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
 
 // ─── Login Screen ─────────────────────────────────────────────────────────
 function LoginScreen({onLogin}){
-  const [tab,setTab]=useState("login"); // "login"|"signup"|"guest"
+  const [tab,setTab]=useState("login");
   const [email,setEmail]=useState("");
   const [pw,setPw]=useState("");
   const [pw2,setPw2]=useState("");
   const [name,setName]=useState("");
   const [school,setSchool]=useState("");
   const [grade,setGrade]=useState("");
-  const [phone,setPhone]=useState("");
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState("");
   const [msg,setMsg]=useState("");
@@ -4012,7 +4010,6 @@ function LoginScreen({onLogin}){
     "auth/weak-password":"비밀번호는 6자 이상이어야 합니다.",
   }[c]||"오류가 발생했습니다. 다시 시도해주세요.");
 
-  // ── 로그인 ────────────────────────────────────────────────────────────────
   const doLogin=async()=>{
     if(!email||!pw){setErr("이메일과 비밀번호를 입력하세요.");return;}
     setLoading(true);setErr("");
@@ -4027,7 +4024,6 @@ function LoginScreen({onLogin}){
     setLoading(false);
   };
 
-  // ── 회원가입 (코인 1개 지급) ─────────────────────────────────────────────
   const doSignup=async()=>{
     if(!email||!pw||!pw2||!name||!school||!grade){setErr("모든 항목을 입력하세요.");return;}
     if(pw!==pw2){setErr("비밀번호가 일치하지 않습니다.");return;}
@@ -4039,79 +4035,36 @@ function LoginScreen({onLogin}){
       const cred=await createUserWithEmailAndPassword(window._fbAuth,email,pw);
       await setDoc(doc(window._fbDb,"users",cred.user.uid),{
         email,name,school,grade,
-        coins:1, // 신규 회원가입 코인 1개 지급
+        coins:1,
         role:"student",
         createdAt:serverTimestamp()
       });
-      setMsg("✅ 회원가입이 완료되었습니다!\n코인 1개가 지급되었습니다. 바로 시작하세요!");
+      setMsg("✅ 회원가입 완료! 코인 1개가 지급되었습니다.");
       setTab("login");
       setEmail("");setPw("");setPw2("");setName("");setSchool("");setGrade("");
     }catch(e){setErr(errMsg(e.code));}
     setLoading(false);
   };
 
-  // ── 비회원 이용 (코인 1개, 로컬 세션) ────────────────────────────────────
-  const doGuest=async()=>{
-    if(!name||!school||!grade||!phone){setErr("이름, 학교, 학년, 연락처를 모두 입력하세요.");return;}
-    const phoneRegex=/^[0-9]{10,11}$/;
-    if(!phoneRegex.test(phone.replace(/-/g,""))){setErr("올바른 연락처를 입력하세요. (예: 010-1234-5678)");return;}
-    setLoading(true);setErr("");
-    try{
-      // Firestore에 비회원 기록 저장
-      await waitFb();
-      const {doc,setDoc,serverTimestamp}=window._fbFns;
-      const guestId="guest_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
-      await setDoc(doc(window._fbDb,"guests",guestId),{
-        name,school,grade,phone,
-        coins:1,
-        createdAt:serverTimestamp()
-      });
-      // 비회원은 Firebase Auth 없이 로컬 세션으로 로그인
-      onLogin({
-        uid:guestId,
-        name,school,grade,phone,
-        email:"비회원",
-        coins:1,
-        role:"guest"
-      });
-    }catch(e){
-      // Firestore 저장 실패해도 비회원으로 진행 (로컬만)
-      const guestId="guest_local_"+Date.now();
-      onLogin({
-        uid:guestId,
-        name,school,grade,phone,
-        email:"비회원",
-        coins:1,
-        role:"guest"
-      });
-    }
-    setLoading(false);
-  };
-
-  const switchTab=(t)=>{setTab(t);setErr("");setMsg("");};
-
-  return <div className="login-wrap" style={{position:"relative",zIndex:9998}}>
+  return <div className="login-wrap">
     <div className="login-box fade">
       <div className="login-logo">STUDY<span>.</span>AI</div>
       <div className="login-title">탐구보고서 AI 시스템</div>
 
-      {/* 탭 */}
       <div style={{display:"flex",gap:0,marginBottom:20,borderRadius:"var(--r)",overflow:"hidden",border:"1px solid var(--border)"}}>
-        {[["login","로그인"],["signup","회원가입"],["guest","비회원 이용"]].map(([key,label])=>(
-          <button key={key} onClick={()=>switchTab(key)}
-            style={{flex:1,padding:"9px 4px",fontSize:12,fontWeight:tab===key?700:400,
+        {[["login","로그인"],["signup","회원가입"]].map(([key,label])=>(
+          <button key={key} onClick={()=>{setTab(key);setErr("");setMsg("");}}
+            style={{flex:1,padding:"9px",fontSize:13,fontWeight:tab===key?700:400,
               background:tab===key?"var(--accent)":"var(--surface2)",
-              color:tab===key?"#fff":"var(--text3)",border:"none",cursor:"pointer",
-              borderRight:key!=="guest"?"1px solid var(--border)":"none"}}>
+              color:tab===key?"#fff":"var(--text3)",border:"none",cursor:"pointer"}}>
             {label}
           </button>
         ))}
       </div>
 
       {err&&<div className="err-box" style={{marginBottom:12}}>{err}</div>}
-      {msg&&<div className="info-box" style={{marginBottom:12,whiteSpace:"pre-line"}}>{msg}</div>}
+      {msg&&<div className="info-box" style={{marginBottom:12}}>{msg}</div>}
 
-      {/* ── 로그인 ── */}
       {tab==="login"&&<>
         <div className="fg"><label>이메일</label>
           <input type="email" placeholder="student@school.kr" value={email}
@@ -4125,17 +4078,13 @@ function LoginScreen({onLogin}){
           onClick={doLogin} disabled={loading}>
           {loading?"로그인 중...":"로그인"}
         </button>
-        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
+        <div style={{textAlign:"center",marginTop:12,fontSize:12,color:"var(--text3)"}}>
           계정이 없으신가요?{" "}
           <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
-            onClick={()=>switchTab("signup")}>회원가입</span>
-          {" · "}
-          <span style={{color:"var(--text3)",cursor:"pointer",textDecoration:"underline"}}
-            onClick={()=>switchTab("guest")}>비회원 이용</span>
+            onClick={()=>{setTab("signup");setErr("");}}>회원가입</span>
         </div>
       </>}
 
-      {/* ── 회원가입 ── */}
       {tab==="signup"&&<>
         <div className="info-box" style={{fontSize:11,marginBottom:12}}>
           🎁 신규 회원가입 시 <strong>코인 1개</strong>가 즉시 지급됩니다!
@@ -4171,56 +4120,13 @@ function LoginScreen({onLogin}){
           onClick={doSignup} disabled={loading}>
           {loading?"처리 중...":"🎁 회원가입 (코인 1개 지급)"}
         </button>
-        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
+        <div style={{textAlign:"center",marginTop:12,fontSize:12,color:"var(--text3)"}}>
           이미 계정이 있으신가요?{" "}
           <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
-            onClick={()=>switchTab("login")}>로그인</span>
+            onClick={()=>{setTab("login");setErr("");}}>로그인</span>
         </div>
       </>}
 
-      {/* ── 비회원 이용 ── */}
-      {tab==="guest"&&<>
-        <div style={{background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",
-          borderRadius:"var(--r)",padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
-          <div style={{fontWeight:700,color:"var(--warn)",marginBottom:4}}>📋 비회원 이용 안내</div>
-          <div>• 코인 <strong>1개</strong>가 지급되어 탐구보고서 1개를 작성할 수 있습니다.</div>
-          <div>• 작성한 보고서는 <strong>저장되지 않습니다.</strong></div>
-          <div>• 계속 이용하려면 회원가입을 추천합니다.</div>
-        </div>
-        <div className="fr2">
-          <div className="fg"><label>이름 *</label>
-            <input type="text" placeholder="홍길동" value={name} onChange={e=>setName(e.target.value)}/>
-          </div>
-          <div className="fg"><label>학교명 *</label>
-            <input type="text" placeholder="○○고등학교" value={school} onChange={e=>setSchool(e.target.value)}/>
-          </div>
-        </div>
-        <div className="fg"><label>학년 *</label>
-          <div style={{display:"flex",gap:8}}>
-            {["1학년","2학년","3학년"].map(g=>(
-              <button key={g} onClick={()=>setGrade(g)}
-                className={"btn "+(grade===g?"btn-primary":"btn-ghost")}
-                style={{flex:1,fontSize:13}}>{g}</button>
-            ))}
-          </div>
-        </div>
-        <div className="fg"><label>연락처 * (숫자만 또는 010-0000-0000)</label>
-          <input type="tel" placeholder="010-1234-5678" value={phone}
-            onChange={e=>setPhone(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doGuest()}/>
-        </div>
-        <button className="btn btn-warn" style={{width:"100%",padding:"12px",marginTop:4,
-          background:"var(--warn)",color:"#000",border:"none",borderRadius:"var(--r)",
-          fontSize:14,fontWeight:600,cursor:"pointer"}}
-          onClick={doGuest} disabled={loading}>
-          {loading?"처리 중...":"비회원으로 시작하기 (코인 1개)"}
-        </button>
-        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
-          <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
-            onClick={()=>switchTab("signup")}>회원가입하면 코인을 더 받을 수 있습니다</span>
-        </div>
-      </>}
-
-      {/* 관리자 연락처 */}
       <div style={{marginTop:24,paddingTop:16,borderTop:"1px solid var(--border)",
         textAlign:"center",fontSize:11,color:"var(--text3)"}}>
         <div>문의 · 코인 지급 요청</div>
@@ -4232,7 +4138,7 @@ function LoginScreen({onLogin}){
   </div>;
 }
 
-// ─── APP ROOT ─────────────────────────────────────────────────────────────
+
 function App(){
   const [user,setUser]=useState(null);
   const [checking,setChecking]=useState(true);
@@ -4254,7 +4160,7 @@ function App(){
               setUser(false);
             }
           }catch(e){
-            console.error("onAuthStateChanged error:",e.message);
+            console.error("Auth error:",e.message);
             setUser(false);
           }
         }else{
@@ -4276,29 +4182,25 @@ function App(){
   };
 
   const handleLogout=async()=>{
-    if(user&&user.role!=="guest"){
-      try{
-        await waitFb();
-        const {signOut}=window._fbFns;
-        await signOut(window._fbAuth);
-      }catch(e){console.warn("logout error:",e.message);}
-    }
+    try{
+      await waitFb();
+      const {signOut}=window._fbFns;
+      await signOut(window._fbAuth);
+    }catch(e){console.warn("logout error:",e.message);}
     setUser(false);setScreen("home");
     setNewReportId(null);setLoadData(null);setLoadReportId(null);
   };
 
   const handleCoinConfirm=async()=>{
     try{
+      await waitFb();
+      const {doc,updateDoc,increment}=window._fbFns;
       const id=user.uid+"_"+Date.now();
+      await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
       setUser(p=>({...p,coins:(p.coins||1)-1}));
       setNewReportId(id);
       setLoadData(null);setLoadReportId(null);
       setScreen("writing");
-      if(user.role!=="guest"){
-        await waitFb();
-        const {doc,updateDoc,increment}=window._fbFns;
-        await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
-      }
     }catch(e){alert("코인 차감 오류: "+e.message);}
   };
 
@@ -4316,31 +4218,6 @@ function App(){
 
   if(!user) return <LoginScreen onLogin={handleLogin}/>;
   if(user.role==="admin") return <AdminScreen user={user} onLogout={handleLogout}/>;
-
-  // 비회원 환영 화면
-  if(user.role==="guest"&&screen==="home"){
-    return <div className="login-wrap" style={{position:"relative",zIndex:9998,alignItems:"flex-start",paddingTop:40}}>
-      <div style={{width:"100%",maxWidth:560,margin:"0 auto"}}>
-        <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"32px",textAlign:"center"}}>
-          <div style={{fontSize:32,marginBottom:8}}>👋</div>
-          <div style={{fontSize:18,fontWeight:700,marginBottom:4}}>{user.name}님, 환영합니다!</div>
-          <div style={{fontSize:13,color:"var(--text3)",marginBottom:20}}>{user.school} {user.grade} · 비회원 이용</div>
-          <div style={{background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",
-            borderRadius:"var(--r)",padding:"12px 16px",marginBottom:20,fontSize:12,color:"var(--warn)",lineHeight:1.8,textAlign:"left"}}>
-            <div style={{fontWeight:700,marginBottom:4}}>📋 비회원 이용 안내</div>
-            <div>🪙 코인 <strong>1개</strong>가 지급되었습니다.</div>
-            <div>✍️ 탐구보고서 <strong>1개</strong>를 작성할 수 있습니다.</div>
-            <div style={{color:"var(--text3)"}}>⚠ 작성한 보고서는 저장되지 않습니다.</div>
-          </div>
-          <button className="btn btn-primary" style={{width:"100%",padding:"13px",fontSize:15,marginBottom:8}}
-            onClick={handleCoinConfirm} disabled={(user.coins||0)<=0}>
-            {(user.coins||0)<=0?"코인 없음":"✍️ 탐구보고서 작성 시작 (코인 1개 사용)"}
-          </button>
-          <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleLogout}>로그아웃</button>
-        </div>
-      </div>
-    </div>;
-  }
 
   if(screen==="writing"){
     return <ReportApp
@@ -4368,7 +4245,8 @@ function App(){
   />;
 }
 
-ReactDOM.createRoot(document.getElementById("root"));
+const _root = ReactDOM.createRoot(document.getElementById("root"));
+_root.render(<App/>);
 setTimeout(function(){
   var fb = document.getElementById('loading-fallback');
   if(fb) fb.style.display = 'none';
