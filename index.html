@@ -301,7 +301,7 @@ function makeFilename(data,suffix){
 
 // ─── Config ───────────────────────────────────────────────────────────────
 let GEMINI_KEY = "";
-const MODEL   = "gemini-2.5-flash";
+const MODEL   = "gemini-2.0-flash";
 const PAGES   = ["기본정보","관심분야","주제추천","소주제구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
 // ─── Gemini helpers ───────────────────────────────────────────────────────
@@ -367,8 +367,7 @@ async function matchRubricsToKeywords(keywords, topic, field){
 
 // ─── API 재시도 유틸리티 ────────────────────────────────────────────────────
 // 503/429 과부하 시 자동 재시도 (최대 3회, 지수 백오프)
-async function withRetry(fn, maxRetries=3, label="API") {
-  const delays = [2000, 5000, 10000]; // 2초, 5초, 10초
+async function withRetry(fn, maxRetries=5, label="API") {
   for(let attempt=0; attempt<=maxRetries; attempt++){
     try{
       return await fn();
@@ -379,10 +378,13 @@ async function withRetry(fn, maxRetries=3, label="API") {
                          msg.includes("503") ||
                          msg.includes("UNAVAILABLE") ||
                          msg.includes("429") ||
-                         msg.includes("quota");
+                         msg.includes("quota") ||
+                         msg.includes("rate limit") ||
+                         msg.includes("RESOURCE_EXHAUSTED");
       if(isOverload && attempt < maxRetries){
-        const wait = delays[attempt]||10000;
-        console.warn(`[${label}] 과부하 감지 → ${wait/1000}초 후 재시도 (${attempt+1}/${maxRetries})`);
+        // 지수 백오프: 3초, 6초, 12초, 24초, 48초
+        const wait = Math.min(3000 * Math.pow(2, attempt), 60000);
+        console.warn(`[${label}] 과부하 → ${Math.round(wait/1000)}초 후 재시도 (${attempt+1}/${maxRetries})`);
         await new Promise(r=>setTimeout(r, wait));
         continue;
       }
@@ -406,7 +408,7 @@ async function gemini(prompt) {
         headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
         body:JSON.stringify({
           contents:[{parts:[{text:prompt}],role:"user"}],
-          generationConfig:{temperature:.8,maxOutputTokens:8192}
+          generationConfig:{temperature:.7,maxOutputTokens:8192}
         })
       }
     );
@@ -1158,7 +1160,7 @@ function Page3({data,set,onPrev,onNext}){
     const valid=data.questions.filter(q=>q.text.trim());
     for(let i=0;i<data.questions.length;i++){
       if(data.questions[i].text.trim()){
-        if(i>0) await sleep(2000); // 소주제 간 2초 딜레이
+        if(i>0) await sleep(3000); // 소주제 간 3초 딜레이
         await searchRefsForQ(i);
       }
     }
@@ -2803,7 +2805,7 @@ function RubricManager(){
         "\"keywords\":[\"키워드1\",\"키워드2\"],\"summary\":\"요약\"}]}\n\n"+
         "PDF 텍스트:\n"+pdfText;
 
-      const res=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",{
+      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,{
         method:"POST",
         headers:{"Content-Type":"application/json","x-goog-api-key":key},
         body:JSON.stringify({
@@ -3734,7 +3736,7 @@ function P13({data,set,onPrev,onFinish}){
       for(let i=0;i<sections.length;i++){
         const s=sections[i];
         setProgress(`(${i+1}/${total}) ${s.label.replace(/[\[\]]/g,"")} 변환 중...`);
-        if(i>0) await sleep(1500); // 연속 호출 간 1.5초 딜레이
+        if(i>0) await sleep(2000); // 연속 호출 간 2초 딜레이
         const r=await gemini(`다음 텍스트를 아래 말투 스타일로 변환해주세요.
 
 스타일: ${styleDesc[style]}
