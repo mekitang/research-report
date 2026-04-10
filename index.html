@@ -301,7 +301,7 @@ function makeFilename(data,suffix){
 
 // ─── Config ───────────────────────────────────────────────────────────────
 let GEMINI_KEY = "AIzaSyBBOJsaOjUOkYNJAj8_kfcRZXA2yOqiRjs";
-const MODEL   = "gemini-2.5-flash-lite-preview-09-2025";
+const MODEL   = "gemini-2.0-flash";
 const PAGES   = ["기본정보","관심분야","주제추천","소주제구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
 // ─── Gemini helpers ───────────────────────────────────────────────────────
@@ -435,10 +435,12 @@ async function geminiRaw(prompt) {
 
 async function geminiJSON(prompt) {
   const raw=await geminiRaw(prompt+"\n\n반드시 JSON만 출력하세요. ```json 코드블록 없이 순수 JSON만 반환하세요.");
+  console.log("geminiJSON raw(앞200자):", raw.slice(0,200));
   const cleaned=raw.replace(/```json[\s\S]*?(?=```)/g,"").replace(/```/g,"").trim();
   const s=cleaned.indexOf("{"); const e=cleaned.lastIndexOf("}");
-  if(s<0||e<0) return null;
-  try{ return JSON.parse(cleaned.slice(s,e+1)); }catch{ return null; }
+  if(s<0||e<0){ console.warn("JSON 구조 없음:", cleaned.slice(0,100)); return null; }
+  try{ return JSON.parse(cleaned.slice(s,e+1)); }
+  catch(err){ console.warn("JSON 파싱 실패:", err.message, cleaned.slice(s,s+200)); return null; }
 }
 
 
@@ -1436,8 +1438,11 @@ function Page4({data,set,onPrev,onNext}){
 조건: 고등학교 수준, 학생부 기록 적합, 탐구 가능
 JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
       if(r?.topics) set(p=>({...p,suggestedTopics:r.topics,selectedTopic:""}));
-      else setErr("생성 실패. 다시 시도해주세요.");
-    }catch(e){setErr("오류: "+e.message);}
+      else setErr("생성 실패 (응답 파싱 오류). 다시 시도해주세요.");
+    }catch(e){
+      console.error("주제 생성 오류:", e);
+      setErr("오류: "+e.message);
+    }
     setLoading(false);
   };
 
