@@ -1,9 +1,12 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>탐구보고서 AI 작성 시스템</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js" crossorigin="anonymous"></script>
 <script>
 (function(){
   var cfg={apiKey:"AIzaSyB36Zz-7cyQ5AeIWxpTzVHhWicp5aW6dn4",authDomain:"research-report-aec4d.firebaseapp.com",projectId:"research-report-aec4d",storageBucket:"research-report-aec4d.firebasestorage.app",messagingSenderId:"39307211816",appId:"1:39307211816:web:f1559bf92be1df4861b11d"};
@@ -32,14 +35,10 @@
   };
   window._fbReady=true;window.dispatchEvent(new Event("firebase-ready"));
 })();
-</script>
 
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>탐구보고서 AI 작성 시스템 v2.0</title>
-<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -229,7 +228,6 @@ textarea{resize:vertical;min-height:80px;}
 </style>
 </head>
 <body>
-<!-- 오류 발생 시 표시 (JS 로드 전) -->
 <div id="loading-fallback" style="position:fixed;inset:0;background:#0a0c10;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;font-family:sans-serif;color:#e8ecf4;">
   <div style="width:8px;height:8px;background:#3b82f6;border-radius:50%;animation:pulse 1.2s ease-in-out infinite;margin-bottom:16px;"></div>
   <div style="font-size:14px;color:#5c6b82;">서비스에 연결 중...</div>
@@ -237,22 +235,26 @@ textarea{resize:vertical;min-height:80px;}
 </div>
 <div id="root"></div>
 <script>
+</div>
+<div id="root"></div>
+<script>
 // 전역 오류 핸들러 - JS 오류 시 화면에 표시
 window.onerror = function(msg, src, line, col, err) {
+  // crossorigin 없는 외부 스크립트의 "Script error."는 무시
+  if(msg === 'Script error.' && !src) return true;
   var fb = document.getElementById('loading-fallback');
   if(fb) {
     fb.innerHTML = '<div style="max-width:500px;padding:24px;background:#111318;border:1px solid #ef4444;border-radius:10px;text-align:left;">' +
       '<div style="color:#ef4444;font-size:16px;font-weight:bold;margin-bottom:12px;">⚠️ 오류가 발생했습니다</div>' +
       '<div style="color:#9aa5bb;font-size:12px;font-family:monospace;white-space:pre-wrap;word-break:break-all;">' + 
-      (msg||'') + '\n\n위치: ' + (src||'') + ':' + (line||'') + ':' + (col||'') + '</div>' +
+      (msg||'') + (src ? ('\n\n위치: ' + src + ':' + (line||'') + ':' + (col||'')) : '') + '</div>' +
       '<div style="margin-top:16px;font-size:12px;color:#5c6b82;">페이지를 새로고침하거나 관리자에게 문의하세요.</div>' +
       '</div>';
     fb.style.display = 'flex';
   }
 };
 window.addEventListener('unhandledrejection', function(e) {
-  window.onerror('Promise 오류: ' + (e.reason&&e.reason.message||e.reason||'Unknown'), '', 0, 0, e.reason);
-});
+  window.onerror('Promise 오류: ' + (e.
 </script>
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback} = React;
@@ -2635,7 +2637,6 @@ JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내
 function MyReportsModal({user,onClose,onLoad}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
-  const [showProfile,setShowProfile]=useState(false);
 
   const loadReports=async()=>{
     setLoading(true);
@@ -3588,6 +3589,7 @@ function UserProfileModal({user, onClose, onUpdate}){
 function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel,onUserUpdate}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
+  const [showProfile,setShowProfile]=useState(false);
 
   useEffect(()=>{
     (async()=>{
@@ -3608,7 +3610,7 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
     })();
   },[]);
 
-  return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40}}>
+  return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40,position:"relative",zIndex:9998}}>
     <div style={{width:"100%",maxWidth:640,margin:"0 auto"}}>
       {/* 헤더 */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:28}}>
@@ -4087,7 +4089,7 @@ function LoginScreen({onLogin}){
 
   const switchTab=(t)=>{setTab(t);setErr("");setMsg("");};
 
-  return <div className="login-wrap">
+  return <div className="login-wrap" style={{position:"relative",zIndex:9998}}>
     <div className="login-box fade">
       <div className="login-logo">STUDY<span>.</span>AI</div>
       <div className="login-title">탐구보고서 AI 시스템</div>
@@ -4254,7 +4256,7 @@ function App(){
             if(fbUser){
               const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
               if(snap.exists()){
-                setUser({uid:fbUser.uid,...snap.data()});
+                setUser({coins:0,role:"student",name:"",school:"",grade:"",...snap.data(),uid:fbUser.uid});
               }else{
                 setUser(false);
               }
@@ -4280,7 +4282,12 @@ function App(){
     return ()=>clearTimeout(fbTimeout);
   },[]);
 
-  const handleLogin=(userData)=>{setChecking(false);setUser(userData);setScreen("home");};
+  const handleLogin=(userData)=>{
+    setChecking(false);
+    // 기본값 보장
+    setUser({coins:0,role:"student",name:"",school:"",grade:"",...userData});
+    setScreen("home");
+  };
 
   const handleLogout=async()=>{
     if(user&&user.role!=="guest"){
@@ -4314,7 +4321,7 @@ function App(){
   };
 
   if(checking){
-    return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
+    return <div style={{position:"fixed",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)",zIndex:9998}}>
       <div className="ai-load"><div className="pulse"/><span>서비스에 연결 중...</span></div>
     </div>;
   }
@@ -4379,12 +4386,18 @@ function App(){
   />;
 }
 
-// React 마운트 성공 시 로딩 화면 숨기기
-(function(){
+const _root = ReactDOM.createRoot(document.getElementById("root"));
+_root.render(<App/>);
+// React 렌더링 후 로딩 화면 숨기기
+setTimeout(()=>{
   var fb = document.getElementById('loading-fallback');
   if(fb) fb.style.display = 'none';
-})();
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+}, 100);
+
+setTimeout(function(){
+  var fb = document.getElementById('loading-fallback');
+  if(fb) fb.style.display = 'none';
+}, 200);
 </script>
 </body>
 </html>
