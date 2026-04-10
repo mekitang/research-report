@@ -297,28 +297,117 @@ async function loadGeminiKey(){
 }
 
 
+// ─── 공통: Firestore rubrics에서 교과 연계 매칭 ────────────────────────────
+async function matchRubricsToKeywords(keywords, topic, field){
+  try{
+    await waitFb();
+    const {collection,getDocs}=window._fbFns;
+    const snap=await getDocs(collection(window._fbDb,"rubrics"));
+    const docs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.deleted);
+    if(docs.length===0) return [];
+
+    // 각 파일의 subjects 배열을 평탄화
+    const allSubjects=[];
+    docs.forEach(doc=>{
+      (doc.subjects||[]).forEach(s=>allSubjects.push({...s,filename:doc.filename}));
+    });
+    if(allSubjects.length===0) return [];
+
+    // AI로 매칭
+    const subjectSummary=allSubjects.map((s,i)=>
+      i+". "+s.subject+": 단원("+( s.units||[]).slice(0,5).join(",")+") 키워드("+(s.keywords||[]).slice(0,8).join(",")+")"
+    ).join("\n");
+
+    const kw=(keywords||[]).join(", ")||"없음";
+    const prompt=
+      "학생의 탐구 관련 정보와 교과 평가기준을 비교하여 가장 연관성 높은 교과와 단원을 추천해주세요.\n\n"+
+      "탐구주제/분야: "+(topic||field||"미입력")+"\n"+
+      "키워드: "+kw+"\n\n"+
+      "등록된 교과 평가기준:\n"+subjectSummary+"\n\n"+
+      "JSON으로만 반환:\n"+
+      "{\"matches\":[{\"subject\":\"과목명\",\"units\":[\"관련단원\"],\"keywords\":[\"관련키워드\"],\"reason\":\"연계 이유 1문장\",\"score\":95}]}";
+
+    const result=await geminiJSON(prompt);
+    return (result?.matches||[]).slice(0,4);
+  }catch(e){
+    console.warn("교과 연계 실패:",e.message);
+    return [];
+  }
+}
+
+
+// ─── API 재시도 유틸리티 ────────────────────────────────────────────────────
+// 503/429 과부하 시 자동 재시도 (최대 3회, 지수 백오프)
+async function withRetry(fn, maxRetries=3, label="API") {
+  const delays = [2000, 5000, 10000]; // 2초, 5초, 10초
+  for(let attempt=0; attempt<=maxRetries; attempt++){
+    try{
+      return await fn();
+    }catch(e){
+      const msg = e.message||"";
+      const isOverload = msg.includes("high demand") ||
+                         msg.includes("overloaded") ||
+                         msg.includes("503") ||
+                         msg.includes("UNAVAILABLE") ||
+                         msg.includes("429") ||
+                         msg.includes("quota");
+      if(isOverload && attempt < maxRetries){
+        const wait = delays[attempt]||10000;
+        console.warn(`[${label}] 과부하 감지 → ${wait/1000}초 후 재시도 (${attempt+1}/${maxRetries})`);
+        await new Promise(r=>setTimeout(r, wait));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+// 연속 호출 간 딜레이 (API 부하 분산)
+const sleep = (ms) => new Promise(r=>setTimeout(r,ms));
+
 async function gemini(prompt) {
   if(!GEMINI_KEY){
     const ok=await loadGeminiKey();
     if(!ok) throw new Error("AI 키가 설정되지 않았습니다. 관리자에게 문의하세요.");
   }
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-    { method:"POST",
-      headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
-      body:JSON.stringify({
-        contents:[{parts:[{text:prompt}],role:"user"}],
-        generationConfig:{temperature:.8,maxOutputTokens:8192}
-      })
-    }
-  );
-  if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
-  const d=await res.json();
-  return d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
+  return withRetry(async()=>{
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+      { method:"POST",
+        headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
+        body:JSON.stringify({
+          contents:[{parts:[{text:prompt}],role:"user"}],
+          generationConfig:{temperature:.8,maxOutputTokens:8192}
+        })
+      }
+    );
+    if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
+    const d=await res.json();
+    const raw=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
+    return cleanMarkdown(raw);
+  }, 3, "gemini");
 }
+async function geminiRaw(prompt) {
+  if(!GEMINI_KEY){ const ok=await loadGeminiKey(); if(!ok) throw new Error("AI 키 없음"); }
+  return withRetry(async()=>{
+    const res=await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+      {method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
+       body:JSON.stringify({contents:[{parts:[{text:prompt}],role:"user"}],
+         generationConfig:{temperature:0.2,maxOutputTokens:8192}})}
+    );
+    if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
+    const d=await res.json();
+    return d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
+  }, 3, "geminiRaw");
+}
+
 async function geminiJSON(prompt) {
-  const raw = await gemini(prompt+"\n\n반드시 JSON만 출력하세요. 마크다운 코드블록 없이 순수 JSON만 반환하세요.");
-  try{ return JSON.parse(raw.replace(/```json|```/g,"").trim()); }catch{ return null; }
+  const raw=await geminiRaw(prompt+"\n\n반드시 JSON만 출력하세요. ```json 코드블록 없이 순수 JSON만 반환하세요.");
+  const cleaned=raw.replace(/```json[\s\S]*?(?=```)/g,"").replace(/```/g,"").trim();
+  const s=cleaned.indexOf("{"); const e=cleaned.lastIndexOf("}");
+  if(s<0||e<0) return null;
+  try{ return JSON.parse(cleaned.slice(s,e+1)); }catch{ return null; }
 }
 
 
@@ -327,7 +416,9 @@ async function geminiJSON(prompt) {
 const INIT = {
   school:"",grade:"",name:"",
   field:"",interest:"",keywords:[],
-  questions:[{text:"",reason:"",link:""},{text:"",reason:"",link:""},{text:"",reason:"",link:""}],
+  questions:[{text:"",reason:"",link:"",links:[]},{text:"",reason:"",link:"",links:[]},{text:"",reason:"",link:"",links:[]}],
+  subTopicCount:3,
+  suggestedSubTopics:[],
   suggestedTopics:[],selectedTopic:"",
   toc:{ intro:{motivation:"1.1 탐구의 동기",purpose:"1.2 탐구의 목적",necessity:"1.3 탐구의 필요성"},
         body:{items:[]},
@@ -338,7 +429,10 @@ const INIT = {
   conclusion:{summary:"",learned:"",skills:"",future:"",refs:[],books:[]},
   correctedText:"",
   selfEval:{motivation:"",process:"",skills:"",learned:"",future:""},
-  correctedEval:{}
+  correctedEval:{},
+  rubricMatches:[],
+  selectedSubject:null,
+  subjectCheckResult:null
 };
 
 // ─── Shared UI ────────────────────────────────────────────────────────────
@@ -498,14 +592,98 @@ function Page1({data,set,onNext}){
 // ─── Page 2 ───────────────────────────────────────────────────────────────
 function Page2({data,set,onPrev,onNext}){
   const [kw,setKw]=useState("");
+  const [rubricMatches,setRubricMatches]=useState(data.rubricMatches||[]);
+  const [rubricLoading,setRubricLoading]=useState(false);
+
+  // 과목 직접 선택 모드
+  const [allSubjects,setAllSubjects]=useState([]); // Firestore의 전체 과목 목록
+  const [subjectsLoading,setSubjectsLoading]=useState(false);
+  const [selectedSubject,setSelectedSubject]=useState(data.selectedSubject||null); // {subject, units, keywords}
+  const [checkResult,setCheckResult]=useState(data.subjectCheckResult||null); // AI 연계 분석 결과
+  const [checkLoading,setCheckLoading]=useState(false);
+  const [mode,setMode]=useState("auto"); // "auto" | "manual"
+
   const FIELDS=["자연과학","생명과학·의학","공학·기술","수학·통계","사회과학","인문학","예술·문화","경제·경영","환경·지구과학","심리학·교육학"];
+
   const addKw=()=>{ const v=kw.trim(); if(v&&!data.keywords.includes(v)) set(p=>({...p,keywords:[...p.keywords,v]})); setKw(""); };
+
+  // ── 자동 분석 ────────────────────────────────────────────────────────────
+  const fetchMatch=async()=>{
+    if(!data.field&&!data.interest&&data.keywords.length===0){
+      alert("관심 분야 또는 키워드를 먼저 입력하세요.");return;
+    }
+    setRubricLoading(true);
+    const matches=await matchRubricsToKeywords(data.keywords,data.interest,data.field);
+    setRubricMatches(matches);
+    set(p=>({...p,rubricMatches:matches}));
+    setRubricLoading(false);
+    if(matches.length===0) alert("등록된 평가기준이 없거나 연관 교과를 찾지 못했습니다.\n관리자에게 평가기준 PDF 업로드를 요청하세요.");
+  };
+
+  // ── 전체 과목 목록 로드 ──────────────────────────────────────────────────
+  const loadAllSubjects=async()=>{
+    setSubjectsLoading(true);
+    try{
+      await waitFb();
+      const {collection,getDocs}=window._fbFns;
+      const snap=await getDocs(collection(window._fbDb,"rubrics"));
+      const docs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.deleted);
+      const list=[];
+      docs.forEach(doc=>(doc.subjects||[]).forEach(s=>list.push(s)));
+      setAllSubjects(list);
+      if(list.length===0) alert("등록된 평가기준이 없습니다.\n관리자에게 평가기준 PDF 업로드를 요청하세요.");
+    }catch(e){alert("과목 목록 로드 실패: "+e.message);}
+    setSubjectsLoading(false);
+  };
+
+  // ── 과목 선택 시 핵심 키워드 표시 ───────────────────────────────────────
+  const selectSubject=(s)=>{
+    setSelectedSubject(s);
+    setCheckResult(null);
+    set(p=>({...p,selectedSubject:s,subjectCheckResult:null}));
+  };
+
+  // ── 선택한 과목 연계 가능 여부 AI 분석 ──────────────────────────────────
+  const checkSubjectLink=async()=>{
+    if(!selectedSubject){alert("과목을 먼저 선택하세요.");return;}
+    if(!data.field&&!data.interest&&data.keywords.length===0){
+      alert("관심 분야 또는 키워드를 먼저 입력하세요.");return;
+    }
+    setCheckLoading(true);
+    try{
+      const kw=(data.keywords||[]).join(", ")||"없음";
+      const sUnits=(selectedSubject.units||[]).join(", ")||"없음";
+      const sKws=(selectedSubject.keywords||[]).join(", ")||"없음";
+      const prompt=
+        "고등학생 탐구보고서에서 아래 학생의 탐구 관심사와 선택한 교과의 연계 가능성을 분석해주세요.\n\n"+
+        "[학생 탐구 정보]\n"+
+        "- 관심 분야: "+(data.field||"미입력")+"\n"+
+        "- 세부 관심: "+(data.interest||"미입력")+"\n"+
+        "- 키워드: "+kw+"\n\n"+
+        "[선택한 교과]\n"+
+        "- 과목명: "+selectedSubject.subject+"\n"+
+        "- 단원: "+sUnits+"\n"+
+        "- 핵심 키워드: "+sKws+"\n\n"+
+        "분석 결과를 JSON으로만 반환:\n"+
+        "{\"linked\":true,\"score\":85,\"level\":\"높음\",\"reason\":\"연계 이유 2~3문장\","+
+        "\"units\":[\"연계 가능한 단원1\",\"단원2\"],"+
+        "\"keywords\":[\"공통 키워드1\",\"키워드2\"],"+
+        "\"suggestion\":\"보고서에서 이 교과를 어떻게 활용하면 좋을지 1문장\"}";
+      const result=await geminiJSON(prompt);
+      if(result){
+        setCheckResult(result);
+        set(p=>({...p,subjectCheckResult:result}));
+      }
+    }catch(e){alert("분석 오류: "+e.message);}
+    setCheckLoading(false);
+  };
+
   return <div className="fade">
     <PH page={2} title="관심 분야 & 키워드" sub="관심 분야와 핵심 키워드를 입력하세요."/>
     <div className="fg">
       <label>관심 분야</label>
       <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-        {FIELDS.map(f=><button key={f} className={`vol-btn ${data.field===f?"sel":""}`} onClick={()=>set(p=>({...p,field:f}))}>{f}</button>)}
+        {FIELDS.map(f=><button key={f} className={"vol-btn "+(data.field===f?"sel":"")} onClick={()=>set(p=>({...p,field:f}))}>{f}</button>)}
       </div>
       <input type="text" placeholder="직접 입력..." value={data.field} onChange={e=>set(p=>({...p,field:e.target.value}))}/>
     </div>
@@ -524,106 +702,392 @@ function Page2({data,set,onPrev,onNext}){
         {data.keywords.map(k=><span key={k} className="tag">{k}<span className="rm" onClick={()=>set(p=>({...p,keywords:p.keywords.filter(x=>x!==k)}))}>×</span></span>)}
       </div>
     </div>
+
+    {/* ── 교과 연계 섹션 ── */}
+    <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px 20px",marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:10}}>📚 교과 연계 분석</div>
+
+      {/* 모드 탭 */}
+      <div style={{display:"flex",gap:6,marginBottom:14}}>
+        <button onClick={()=>setMode("auto")}
+          className={"btn "+(mode==="auto"?"btn-primary":"btn-ghost")}
+          style={{fontSize:11,padding:"5px 14px"}}>
+          🤖 자동 분석
+        </button>
+        <button onClick={()=>{setMode("manual");if(allSubjects.length===0)loadAllSubjects();}}
+          className={"btn "+(mode==="manual"?"btn-primary":"btn-ghost")}
+          style={{fontSize:11,padding:"5px 14px"}}>
+          📋 과목 직접 선택
+        </button>
+      </div>
+
+      {/* 자동 분석 모드 */}
+      {mode==="auto"&&(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:rubricMatches.length>0?12:0}}>
+            <div style={{fontSize:11,color:"var(--text3)"}}>관심분야·키워드와 연관된 교과를 AI가 자동으로 찾아줍니다.</div>
+            <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 12px",flexShrink:0}}
+              onClick={fetchMatch} disabled={rubricLoading}>
+              {rubricLoading?"분석 중...":"🔍 교과 연계 분석"}
+            </button>
+          </div>
+          {rubricLoading&&<AILoad msg="관련 교과를 분석 중..."/>}
+          {rubricMatches.length>0&&(
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
+              {rubricMatches.map((m,i)=>(
+                <div key={i} style={{background:"var(--surface2)",borderRadius:"var(--r)",padding:"10px 14px",borderLeft:"3px solid var(--accent)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"var(--accent)"}}>📖 {m.subject}</div>
+                    <div style={{fontSize:10,background:"var(--accent-dim)",color:"var(--accent)",borderRadius:"10px",padding:"2px 8px",fontFamily:"var(--mono)"}}>연관도 {m.score||"-"}%</div>
+                  </div>
+                  {m.units?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}}>
+                    {m.units.map((u,j)=><span key={j} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",color:"var(--accent)",borderRadius:"4px",padding:"1px 7px",fontSize:11}}>{u}</span>)}
+                  </div>}
+                  {m.keywords?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}}>
+                    {m.keywords.map((k,j)=><span key={j} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",color:"var(--success)",borderRadius:"4px",padding:"1px 7px",fontSize:11}}>{k}</span>)}
+                  </div>}
+                  {m.reason&&<div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{m.reason}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 과목 직접 선택 모드 */}
+      {mode==="manual"&&(
+        <div>
+          <div style={{fontSize:11,color:"var(--text3)",marginBottom:10}}>과목을 선택하면 핵심 키워드가 표시되고, 내 탐구와의 연계 가능성을 분석합니다.</div>
+          {subjectsLoading&&<AILoad msg="과목 목록 불러오는 중..."/>}
+          {!subjectsLoading&&allSubjects.length===0&&(
+            <div style={{fontSize:12,color:"var(--text3)",textAlign:"center",padding:"16px 0"}}>
+              등록된 과목이 없습니다. 관리자에게 평가기준 PDF 업로드를 요청하세요.
+            </div>
+          )}
+          {/* 과목 목록 */}
+          {allSubjects.length>0&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+              {allSubjects.map((s,i)=>(
+                <button key={i}
+                  onClick={()=>selectSubject(s)}
+                  style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--r)",cursor:"pointer",
+                    background:selectedSubject?.subject===s.subject?"var(--accent)":"var(--surface2)",
+                    color:selectedSubject?.subject===s.subject?"#fff":"var(--text2)",
+                    border:"1px solid "+(selectedSubject?.subject===s.subject?"var(--accent)":"var(--border2)"),
+                    transition:"all .15s",fontWeight:selectedSubject?.subject===s.subject?600:400}}>
+                  {s.subject}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 선택된 과목 핵심 키워드 */}
+          {selectedSubject&&(
+            <div style={{background:"var(--surface2)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",padding:"14px 16px",marginBottom:12}}>
+              <div style={{fontSize:13,fontWeight:700,color:"var(--accent)",marginBottom:10}}>
+                📖 {selectedSubject.subject} — 핵심 정보
+              </div>
+              {selectedSubject.units?.length>0&&(
+                <div style={{marginBottom:8}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:5}}>단원 / 영역</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {selectedSubject.units.map((u,j)=>(
+                      <span key={j} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",
+                        color:"var(--accent)",borderRadius:"4px",padding:"3px 9px",fontSize:12}}>{u}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {selectedSubject.keywords?.length>0&&(
+                <div style={{marginBottom:10}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:5}}>핵심 키워드 / 성취기준</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {selectedSubject.keywords.map((k,j)=>(
+                      <span key={j}
+                        onClick={()=>{ if(!data.keywords.includes(k)) set(p=>({...p,keywords:[...p.keywords,k]})); }}
+                        style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",
+                          color:"var(--success)",borderRadius:"4px",padding:"3px 9px",fontSize:12,
+                          cursor:"pointer",transition:"all .15s"}}
+                        title="클릭하면 내 키워드에 추가">
+                        {k} <span style={{fontSize:9,opacity:0.7}}>+</span>
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{fontSize:10,color:"var(--text3)",marginTop:5}}>💡 키워드를 클릭하면 내 키워드에 추가됩니다.</div>
+                </div>
+              )}
+              {selectedSubject.summary&&(
+                <div style={{fontSize:12,color:"var(--text3)",lineHeight:1.6,borderTop:"1px solid var(--border)",paddingTop:8}}>
+                  {selectedSubject.summary}
+                </div>
+              )}
+
+              {/* 연계 가능 여부 분석 버튼 */}
+              <button className="btn btn-primary" style={{width:"100%",marginTop:10,fontSize:12}}
+                onClick={checkSubjectLink} disabled={checkLoading}>
+                {checkLoading?"분석 중...":"🔗 내 탐구와의 연계 가능성 분석"}
+              </button>
+            </div>
+          )}
+
+          {/* 연계 분석 결과 */}
+          {checkLoading&&<AILoad msg="연계 가능성을 분석 중..."/>}
+          {checkResult&&(
+            <div style={{background:checkResult.linked?"rgba(34,197,94,0.08)":"rgba(239,68,68,0.08)",
+              border:"1px solid "+(checkResult.linked?"rgba(34,197,94,0.4)":"rgba(239,68,68,0.4)"),
+              borderRadius:"var(--r2)",padding:"16px"}}>
+              {/* 결과 헤더 */}
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <div style={{fontSize:24}}>{checkResult.linked?"✅":"❌"}</div>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,color:checkResult.linked?"var(--success)":"var(--danger)"}}>
+                    {checkResult.linked?"연계 가능":"연계 어려움"} — {selectedSubject?.subject}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3}}>
+                    <div style={{fontSize:11,color:"var(--text3)"}}>연계도</div>
+                    <div style={{flex:1,height:6,background:"var(--border2)",borderRadius:3,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:(checkResult.score||0)+"%",
+                        background:checkResult.score>=70?"var(--success)":checkResult.score>=40?"var(--warn)":"var(--danger)",
+                        borderRadius:3,transition:"width .5s"}}/>
+                    </div>
+                    <div style={{fontSize:11,fontWeight:600,fontFamily:"var(--mono)",color:"var(--text2)",flexShrink:0}}>
+                      {checkResult.score||0}%
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {/* 이유 */}
+              {checkResult.reason&&(
+                <div style={{fontSize:12,color:"var(--text2)",lineHeight:1.7,marginBottom:10,
+                  background:"var(--surface)",padding:"10px 12px",borderRadius:"var(--r)"}}>
+                  {checkResult.reason}
+                </div>
+              )}
+              {/* 연계 단원 */}
+              {checkResult.units?.length>0&&(
+                <div style={{marginBottom:8}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:4}}>연계 가능한 단원</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {checkResult.units.map((u,i)=>(
+                      <span key={i} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",
+                        color:"var(--accent)",borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{u}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* 공통 키워드 */}
+              {checkResult.keywords?.length>0&&(
+                <div style={{marginBottom:8}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:4}}>공통 키워드</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {checkResult.keywords.map((k,i)=>(
+                      <span key={i} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",
+                        color:"var(--success)",borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{k}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* 활용 제안 */}
+              {checkResult.suggestion&&(
+                <div style={{fontSize:11,color:"var(--accent)",background:"var(--accent-dim)",
+                  padding:"8px 12px",borderRadius:"var(--r)",marginTop:4}}>
+                  💡 {checkResult.suggestion}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+
     <NavRow page={1} onPrev={onPrev} onNext={onNext} nextDisabled={!data.field||!data.interest}/>
   </div>;
 }
 
-// ─── Page 3 ───────────────────────────────────────────────────────────────
 function Page3({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
+  const [refLoading,setRefLoading]=useState(false);
   const [err,setErr]=useState("");
+  const [count,setCount]=useState(data.subTopicCount||3);
+  const [suggestions,setSuggestions]=useState(data.suggestedSubTopics||[]);
+  const [showSuggest,setShowSuggest]=useState(false);
+  const [subjectMatches,setSubjectMatches]=useState(data.rubricMatches||[]);
+  const [subjectLoading,setSubjectLoading]=useState(false);
+  // 과목 직접 선택
+  const [allSubjectsP3,setAllSubjectsP3]=useState([]);
+  const [subjectsLoadingP3,setSubjectsLoadingP3]=useState(false);
+  const [selectedSubjectP3,setSelectedSubjectP3]=useState(data.selectedSubject||null);
+  const [checkResultP3,setCheckResultP3]=useState(data.subjectCheckResult||null);
+  const [checkLoadingP3,setCheckLoadingP3]=useState(false);
+  const [modeP3,setModeP3]=useState("auto");
+
+  // 소주제 업데이트
   const updQ=(i,k,v)=>{ const q=[...data.questions]; q[i]={...q[i],[k]:v}; set(p=>({...p,questions:q})); };
   const updLink=(i,li,field,v)=>{ const q=[...data.questions]; const links=[...(q[i].links||[])]; links[li]={...links[li],[field]:v}; q[i]={...q[i],links,link:links[0]?.url||""}; set(p=>({...p,questions:q})); };
   const addLink=(i)=>{ const q=[...data.questions]; q[i]={...q[i],links:[...(q[i].links||[]),{url:"",title:"직접 입력"}]}; set(p=>({...p,questions:q})); };
   const rmLink=(i,li)=>{ const q=[...data.questions]; const links=(q[i].links||[]).filter((_,idx)=>idx!==li); q[i]={...q[i],links,link:links[0]?.url||""}; set(p=>({...p,questions:q})); };
-  const addQ=()=>set(p=>({...p,questions:[...p.questions,{text:"",reason:"",link:"",links:[]}]}));
-  const rmQ=(i)=>set(p=>({...p,questions:p.questions.filter((_,idx)=>idx!==i)}));
 
-  // Gemini with Google Search grounding — returns actual URLs from web
-  const geminiSearch=async(prompt)=>{
-    const res=await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-      { method:"POST",
-        headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
-        body:JSON.stringify({
-          contents:[{parts:[{text:prompt}],role:"user"}],
-          tools:[{googleSearch:{}}],
-          generationConfig:{temperature:0.3,maxOutputTokens:8192}
-        })
-      }
-    );
-    if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
-    const d=await res.json();
-    const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
-    // Extract grounding sources (actual URLs from Google Search)
-    const groundingChunks=d.candidates?.[0]?.groundingMetadata?.groundingChunks||[];
-    const groundingSources=groundingChunks
-      .filter(c=>c.web?.uri)
-      .map(c=>({url:c.web.uri, title:c.web.title||c.web.uri}));
-    return {text, sources:groundingSources};
+  // 소주제 개수 변경시 questions 배열 조정
+  const changeCount=(n)=>{
+    setCount(n);
+    const cur=data.questions||[];
+    let newQ=[...cur];
+    while(newQ.length<n) newQ.push({text:"",reason:"",link:"",links:[]});
+    if(newQ.length>n) newQ=newQ.slice(0,n);
+    set(p=>({...p,questions:newQ,subTopicCount:n}));
   };
 
-  const aiGen=async()=>{
-    setLoading(true); setErr("");
+  // Google Search grounding
+  const geminiSearch=async(prompt)=>{
+    if(!GEMINI_KEY){ const ok=await loadGeminiKey(); if(!ok) throw new Error("AI 키 없음"); }
+    return withRetry(async()=>{
+      const res=await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+        { method:"POST",
+          headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
+          body:JSON.stringify({
+            contents:[{parts:[{text:prompt}],role:"user"}],
+            tools:[{googleSearch:{}}],
+            generationConfig:{temperature:0.3,maxOutputTokens:8192}
+          })
+        }
+      );
+      if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
+      const d=await res.json();
+      const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
+      const chunks=d.candidates?.[0]?.groundingMetadata?.groundingChunks||[];
+      const sources=chunks.filter(c=>c.web?.uri).map(c=>({url:c.web.uri,title:c.web.title||c.web.uri}));
+      return {text, sources};
+    }, 3, "geminiSearch");
+  };
+
+  // AI 소주제 추천
+  const aiSuggest=async()=>{
+    setLoading(true); setErr(""); setSuggestions([]); setShowSuggest(false);
     try{
       const kw=data.keywords.join(", ");
-
-      // Step 1: Generate questions
-      const qResult=await geminiJSON(`
-고등학생 탐구보고서 탐구 질문 3개를 생성해주세요.
-학년:${data.grade} / 분야:${data.field} / 세부관심:${data.interest} / 키워드:${kw}
-조건: 본론 소챕터용, 구체적, 고등학생 수준, 이유 2-3문장 포함
-JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason":"이유"},{"text":"질문","reason":"이유"}]}`);
-
-      if(!qResult?.questions){ setErr("질문 생성 실패. 다시 시도해주세요."); setLoading(false); return; }
-
-      // Step 2: For each question, use Google Search grounding to find real URLs
-      const newQs=[];
-      for(let i=0;i<qResult.questions.length;i++){
-        const q=qResult.questions[i];
-        let links=[];
-        try{
-          const searchPrompt=`다음 탐구 질문과 관련된 신뢰할 수 있는 한국어 자료(논문, 기사, 학술자료, 유튜브 영상, 칼럼 등)를 찾아주세요.
-
-탐구 질문: "${q.text}"
-관심 분야: ${data.field}
-키워드: ${kw}
-
-반드시 실제로 접근 가능한 URL을 가진 자료만 2~3개 소개해주세요.
-각 자료에 대해 제목과 URL을 정확히 알려주세요.
-형식: 반드시 JSON만 출력
-{"sources":[{"title":"자료제목","url":"https://실제URL","type":"논문|기사|영상|칼럼|보고서"}]}`;
-
-          const {text, sources}=await geminiSearch(searchPrompt);
-
-          // Prefer grounding sources (real URLs from Google Search)
-          if(sources && sources.length>0){
-            links=sources.slice(0,3).map(s=>({
-              url:s.url,
-              title:s.title||q.text+" 관련 자료"
-            }));
-          } else {
-            // Fallback: try to parse JSON from text response
-            try{
-              const clean=text.replace(/```json|```/g,"").trim();
-              const parsed=JSON.parse(clean);
-              if(parsed?.sources) links=(parsed.sources||[]).slice(0,3).map(s=>({url:s.url,title:`[${s.type||"자료"}] ${s.title}`}));
-            }catch{}
-          }
-        }catch(e){ console.warn("Search failed for Q"+(i+1), e.message); }
-
-        newQs.push({
-          text:q.text||"", reason:q.reason||"",
-          links:links,
-          link:links[0]?.url||""
-        });
-      }
-      set(p=>({...p,questions:newQs}));
+      const topic=data.selectedTopic||"";
+      const result=await geminiJSON(
+        "고등학생 탐구보고서 본론 소주제를 6개 추천해주세요.\n"+
+        "탐구주제: "+topic+"\n학년: "+data.grade+"\n분야: "+data.field+"\n세부관심: "+data.interest+"\n키워드: "+kw+"\n"+
+        "조건: 각 소주제는 본론 한 챕터로 작성 가능한 수준, 구체적이고 논리적 흐름이 있어야 함, 이유 2문장 포함\n"+
+        "JSON:{\"subtopics\":[{\"text\":\"소주제\",\"reason\":\"이유\"},{\"text\":\"소주제\",\"reason\":\"이유\"}]}"
+      );
+      if(result?.subtopics){
+        setSuggestions(result.subtopics.slice(0,6));
+        setShowSuggest(true);
+        set(p=>({...p,suggestedSubTopics:result.subtopics.slice(0,6)}));
+      } else setErr("소주제 추천 실패. 다시 시도해주세요.");
     }catch(e){setErr("오류: "+e.message);}
     setLoading(false);
   };
 
-  // Search refs for a single question
+  // 선택된 소주제 순서 추천
+  const aiSortOrder=async()=>{
+    const filled=(data.questions||[]).filter(q=>q.text.trim());
+    if(filled.length<2){alert("소주제가 2개 이상이어야 순서를 추천받을 수 있습니다.");return;}
+    setLoading(true);
+    try{
+      const topicList=filled.map((q,i)=>(i+1)+". "+q.text).join("\n");
+      const topic=data.selectedTopic||data.field||"";
+      const result=await geminiJSON(
+        "다음 탐구보고서 소주제들의 논리적 순서를 추천해주세요.\n"+
+        "탐구주제: "+topic+"\n"+
+        "현재 소주제 목록:\n"+topicList+"\n\n"+
+        "조건: 인과관계·개념 흐름·난이도 순으로 배열, 각 이유 1문장\n"+
+        "JSON:{\"order\":[0,1,2],\"reasons\":[\"이유1\",\"이유2\",\"이유3\"],\"overall\":\"전체 순서 설명\"}"
+      );
+      if(result?.order){
+        const newQ=[...data.questions];
+        const sorted=result.order.map(idx=>filled[idx]||filled[0]);
+        // 빈 소주제 유지, 선택된 것만 재정렬
+        let si=0;
+        for(let i=0;i<newQ.length;i++){
+          if(newQ[i].text.trim()&&si<sorted.length){newQ[i]={...sorted[si]};si++;}
+        }
+        set(p=>({...p,questions:newQ}));
+        const msg="📊 추천 순서:\n"+sorted.map((q,i)=>(i+1)+". "+q.text+"\n   → "+(result.reasons?.[i]||"")).join("\n")+(result.overall?"\n\n"+result.overall:"");
+        alert(msg);
+      }
+    }catch(e){alert("오류: "+e.message);}
+    setLoading(false);
+  };
+
+  // 소주제 기반 교과 연계 분석
+  const fetchSubjectMatch=async()=>{
+    const filled=(data.questions||[]).filter(q=>q.text.trim());
+    if(filled.length===0){alert("소주제를 먼저 입력하세요.");return;}
+    setSubjectLoading(true);
+    const topicText=filled.map(q=>q.text).join(", ");
+    const matches=await matchRubricsToKeywords(
+      data.keywords,
+      (data.selectedTopic||"")+" 소주제: "+topicText,
+      data.field
+    );
+    setSubjectMatches(matches);
+    set(p=>({...p,rubricMatches:matches}));
+    setSubjectLoading(false);
+    if(matches.length===0) alert("등록된 평가기준이 없거나 연관 교과를 찾지 못했습니다.");
+  };
+
+  // 과목 직접 선택 (Page3용)
+  const loadAllSubjectsP3=async()=>{
+    setSubjectsLoadingP3(true);
+    try{
+      await waitFb();
+      const {collection,getDocs}=window._fbFns;
+      const snap=await getDocs(collection(window._fbDb,"rubrics"));
+      const docs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.deleted);
+      const list=[];
+      docs.forEach(doc=>(doc.subjects||[]).forEach(s=>list.push(s)));
+      setAllSubjectsP3(list);
+      if(list.length===0) alert("등록된 과목이 없습니다.");
+    }catch(e){alert("과목 목록 로드 실패: "+e.message);}
+    setSubjectsLoadingP3(false);
+  };
+
+  const selectSubjectP3=(s)=>{
+    setSelectedSubjectP3(s);
+    setCheckResultP3(null);
+    set(p=>({...p,selectedSubject:s,subjectCheckResult:null}));
+  };
+
+  const checkSubjectLinkP3=async()=>{
+    if(!selectedSubjectP3){alert("과목을 먼저 선택하세요.");return;}
+    setCheckLoadingP3(true);
+    try{
+      const filled=(data.questions||[]).filter(q=>q.text.trim()).map(q=>q.text).join(", ");
+      const kw=(data.keywords||[]).join(", ")||"없음";
+      const sUnits=(selectedSubjectP3.units||[]).join(", ")||"없음";
+      const sKws=(selectedSubjectP3.keywords||[]).join(", ")||"없음";
+      const prompt=
+        "고등학생 탐구보고서에서 아래 소주제들과 선택한 교과의 연계 가능성을 분석해주세요.\n\n"+
+        "[탐구 정보]\n- 탐구주제: "+(data.selectedTopic||"미입력")+"\n"+
+        "- 소주제: "+filled+"\n- 키워드: "+kw+"\n\n"+
+        "[선택 교과]\n- 과목명: "+selectedSubjectP3.subject+"\n"+
+        "- 단원: "+sUnits+"\n- 핵심 키워드: "+sKws+"\n\n"+
+        "JSON으로만 반환:\n"+
+        '{"linked":true,"score":85,"level":"높음","reason":"연계 이유 2~3문장",'+
+        '"units":["연계 가능한 단원"],"keywords":["공통 키워드"],'+
+        '"suggestion":"보고서에서 이 교과를 어떻게 활용하면 좋을지 1문장"}';
+      const result=await geminiJSON(prompt);
+      if(result){ setCheckResultP3(result); set(p=>({...p,subjectCheckResult:result})); }
+    }catch(e){alert("분석 오류: "+e.message);}
+    setCheckLoadingP3(false);
+  };
+
+  // 추천 소주제 선택
+  const selectSuggestion=(s)=>{
+    const cur=data.questions||[];
+    const empty=cur.findIndex(q=>!q.text.trim());
+    if(empty<0&&cur.length>=count){setErr("소주제가 이미 "+count+"개 입니다. 개수를 늘리거나 기존 소주제를 지워주세요.");return;}
+    const newQ=[...cur];
+    if(empty>=0) newQ[empty]={...newQ[empty],text:s.text,reason:s.reason||"",links:[],link:""};
+    else if(newQ.length<count) newQ.push({text:s.text,reason:s.reason||"",links:[],link:""});
+    set(p=>({...p,questions:newQ}));
+  };
+
+  // 소주제별 참고자료 검색 (5개)
   const searchRefsForQ=async(qIdx)=>{
     const q=data.questions[qIdx];
     if(!q?.text) return;
@@ -631,23 +1095,22 @@ JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason"
     qs[qIdx]={...qs[qIdx],linksLoading:true};
     set(p=>({...p,questions:qs}));
     try{
-      const searchPrompt=`다음 탐구 질문과 관련된 신뢰할 수 있는 한국어 자료(논문, 기사, 학술자료, 유튜브 영상, 칼럼 등)를 찾아주세요.
+      const topic=data.selectedTopic||data.field||"";
+      const searchPrompt=
+        "다음 탐구 소주제와 관련된 신뢰할 수 있는 한국어 자료(논문, 학술자료, 기사, 유튜브 영상, 칼럼 등)를 찾아주세요.\n\n"+
+        "소주제: \""+q.text+"\"\n탐구주제: "+topic+"\n관심 분야: "+data.field+"\n\n"+
+        "반드시 실제로 접근 가능한 URL을 가진 자료만 5개 소개해주세요.\n"+
+        "형식: 반드시 JSON만 출력\n"+
+        "{\"sources\":[{\"title\":\"자료제목\",\"url\":\"https://실제URL\",\"type\":\"논문|기사|영상|칼럼|보고서\"}]}";
 
-탐구 질문: "${q.text}"
-관심 분야: ${data.field}
-
-반드시 실제로 접근 가능한 URL을 가진 자료만 2~3개 소개해주세요.
-형식: 반드시 JSON만 출력
-{"sources":[{"title":"자료제목","url":"https://실제URL","type":"논문|기사|영상|칼럼|보고서"}]}`;
-
-      const {text, sources}=await geminiSearch(searchPrompt);
+      const {text,sources}=await geminiSearch(searchPrompt);
       let links=[];
-      if(sources && sources.length>0){
-        links=sources.slice(0,3).map(s=>({url:s.url,title:s.title||q.text+" 관련 자료"}));
+      if(sources&&sources.length>0){
+        links=sources.slice(0,5).map(s=>({url:s.url,title:s.title||q.text+" 관련 자료"}));
       } else {
         try{
           const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());
-          if(parsed?.sources) links=(parsed.sources||[]).slice(0,3).map(s=>({url:s.url,title:`[${s.type||"자료"}] ${s.title}`}));
+          if(parsed?.sources) links=(parsed.sources||[]).slice(0,5).map(s=>({url:s.url,title:"["+( s.type||"자료")+"] "+s.title}));
         }catch{}
       }
       const updated=[...data.questions];
@@ -660,29 +1123,99 @@ JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason"
     }
   };
 
+  // 전체 소주제 참고자료 일괄 검색
+  const searchAllRefs=async()=>{
+    setRefLoading(true);
+    const valid=data.questions.filter(q=>q.text.trim());
+    for(let i=0;i<data.questions.length;i++){
+      if(data.questions[i].text.trim()){
+        if(i>0) await sleep(2000); // 소주제 간 2초 딜레이
+        await searchRefsForQ(i);
+      }
+    }
+    setRefLoading(false);
+  };
+
+  const filledCount=(data.questions||[]).filter(q=>q.text.trim()).length;
+
   return <div className="fade">
-    <PH page={3} title="탐구 질문 구성" sub="관심 분야에서 궁금한 점을 질문으로 정리하세요. (최소 3개)"/>
-    <div className="btn-row">
-      <button className="btn btn-primary" onClick={aiGen} disabled={loading}>
-        {loading?"생성 중...":"🤖 AI로 질문 + 참고자료 자동 생성"}
-      </button>
-      <button className="btn btn-ghost" onClick={addQ}>+ 질문 추가</button>
+    <PH page={4} title="본론 소주제 정하기" sub="탐구보고서 본론에서 다룰 소주제를 정하세요."/>
+
+    {/* 소주제 개수 선택 */}
+    <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px 20px",marginBottom:16}}>
+      <div className="sec-label" style={{marginBottom:10}}>소주제 개수 선택</div>
+      <div style={{display:"flex",gap:8}}>
+        {[3,4,5].map(n=>(
+          <button key={n} onClick={()=>changeCount(n)}
+            className={"btn "+(count===n?"btn-primary":"btn-ghost")}
+            style={{flex:1,fontSize:14,fontWeight:600}}>
+            {n}개
+          </button>
+        ))}
+      </div>
+      <div style={{fontSize:11,color:"var(--text3)",marginTop:8,textAlign:"center"}}>
+        현재 <strong style={{color:"var(--accent)"}}>{filledCount}/{count}</strong>개 소주제 작성됨
+      </div>
     </div>
-    {loading&&<AILoad msg="질문 생성 후 각 질문별 실제 자료를 검색 중... (약 20~30초 소요)"/>}
+
+    {/* AI 소주제 추천 */}
+    <div className="btn-row" style={{marginBottom:16}}>
+      <button className="btn btn-primary" onClick={aiSuggest} disabled={loading}>
+        {loading?"추천 중...":"🤖 AI로 소주제 추천받기"}
+      </button>
+      {filledCount>0&&<button className="btn btn-secondary" onClick={searchAllRefs} disabled={refLoading}>
+        {refLoading?"자료 검색 중...":"🔍 전체 참고자료 검색"}
+      </button>}
+    </div>
+    {loading&&<AILoad msg="소주제를 분석하고 추천 중..."/>}
+    {refLoading&&<AILoad msg="각 소주제별 참고자료를 검색 중... (약 30~40초 소요)"/>}
     {err&&<div style={{color:"var(--danger)",fontSize:13,marginBottom:10}}>{err}</div>}
-    {data.questions.map((q,i)=>(
-      <div key={i} className="qcard fade">
-        <div className="qnum">QUESTION {String(i+1).padStart(2,"0")}</div>
-        {i>=3&&<button className="btn btn-danger q-rm" onClick={()=>rmQ(i)}>제거</button>}
-        <div className="fg"><label>질문</label>
-          <textarea rows={2} placeholder="예: 인공지능은 의사의 진단 정확도를 얼마나 향상시킬 수 있는가?" value={q.text} onChange={e=>updQ(i,"text",e.target.value)}/>
+
+    {/* AI 추천 목록 */}
+    {showSuggest&&suggestions.length>0&&(
+      <div style={{background:"var(--surface2)",border:"1px solid var(--accent-dim)",borderRadius:"var(--r2)",padding:"16px",marginBottom:16}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div style={{fontSize:12,color:"var(--accent)",fontWeight:600}}>💡 AI 추천 소주제 — 클릭하여 선택</div>
+          <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 10px"}}
+            onClick={()=>aiSortOrder()}
+            disabled={filledCount<2}>
+            📊 선택된 소주제 순서 추천
+          </button>
         </div>
-        <div className="fg"><label>질문한 이유</label>
-          <textarea rows={2} placeholder="이 질문을 갖게 된 배경이나 이유를 서술하세요." value={q.reason} onChange={e=>updQ(i,"reason",e.target.value)}/>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {suggestions.map((s,i)=>{
+            const already=(data.questions||[]).some(q=>q.text===s.text);
+            return <div key={i} onClick={()=>!already&&selectSuggestion(s)}
+              style={{background:already?"var(--surface3)":"var(--surface)",
+                border:"1px solid "+(already?"var(--border)":"var(--border2)"),
+                borderRadius:"var(--r)",padding:"10px 14px",
+                cursor:already?"default":"pointer",opacity:already?0.5:1,
+                transition:"all .15s"}}
+              onMouseEnter={e=>{ if(!already) e.currentTarget.style.borderColor="var(--accent)"; }}
+              onMouseLeave={e=>{ if(!already) e.currentTarget.style.borderColor="var(--border2)"; }}>
+              <div style={{fontSize:13,fontWeight:600,color:already?"var(--text3)":"var(--text)",marginBottom:3}}>
+                {already?"✅ ":""}{s.text}
+              </div>
+              <div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{s.reason}</div>
+            </div>;
+          })}
+        </div>
+      </div>
+    )}
+
+    {/* 소주제 카드 */}
+    {(data.questions||[]).slice(0,count).map((q,i)=>(
+      <div key={i} className="qcard fade">
+        <div className="qnum">소주제 {String(i+1).padStart(2,"0")}</div>
+        <div className="fg"><label>소주제</label>
+          <textarea rows={2} placeholder={"예: 인공지능의 의료 진단 활용 현황과 정확도 분석"} value={q.text} onChange={e=>updQ(i,"text",e.target.value)}/>
+        </div>
+        <div className="fg"><label>이 소주제를 선택한 이유</label>
+          <textarea rows={2} placeholder="이 소주제를 탐구하려는 이유나 배경을 서술하세요." value={q.reason} onChange={e=>updQ(i,"reason",e.target.value)}/>
         </div>
         <div className="fg">
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-            <label>참고 자료 링크 (참고문헌)</label>
+            <label>참고 자료 링크 (최대 5개)</label>
             <div style={{display:"flex",gap:5}}>
               <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px",color:"var(--accent)",borderColor:"var(--accent)"}}
                 onClick={()=>searchRefsForQ(i)} disabled={!q.text.trim()||q.linksLoading}>
@@ -696,6 +1229,7 @@ JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason"
               {q.links.map((lk,li)=>(
                 <div key={li} style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r)",padding:"10px 12px"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <span style={{fontSize:10,color:"var(--accent)",fontFamily:"var(--mono)",marginRight:6}}>자료 {li+1}</span>
                     <input type="text" style={{fontSize:11,flex:1,marginRight:8,padding:"2px 6px",color:"var(--accent)",background:"transparent",border:"none",borderBottom:"1px dashed var(--border2)"}}
                       value={lk.title||""} onChange={e=>updLink(i,li,"title",e.target.value)} placeholder="자료 설명 입력"/>
                     <button className="btn btn-danger" style={{fontSize:10,padding:"2px 7px",flexShrink:0}} onClick={()=>rmLink(i,li)}>제거</button>
@@ -711,14 +1245,140 @@ JSON:{"questions":[{"text":"질문","reason":"이유"},{"text":"질문","reason"
               ))}
             </div>
           ) : (
-            <input type="text" placeholder="https://... (직접 입력하거나 AI 생성 버튼 사용)" value={q.link||""} onChange={e=>updQ(i,"link",e.target.value)}/>
+            <input type="text" placeholder="https://... (직접 입력하거나 AI 자료검색 버튼 사용)" value={q.link||""} onChange={e=>updQ(i,"link",e.target.value)}/>
           )}
         </div>
       </div>
     ))}
-    <NavRow page={2} onPrev={onPrev} onNext={onNext} nextDisabled={data.questions.filter(q=>q.text.trim()).length<3}/>
+
+    {/* 교과 연계 패널 */}
+    <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px 20px",marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:10}}>📚 소주제 기반 교과 연계</div>
+      {/* 모드 탭 */}
+      <div style={{display:"flex",gap:6,marginBottom:14}}>
+        <button onClick={()=>setModeP3("auto")} className={"btn "+(modeP3==="auto"?"btn-primary":"btn-ghost")} style={{fontSize:11,padding:"5px 14px"}}>🤖 자동 분석</button>
+        <button onClick={()=>{setModeP3("manual");if(allSubjectsP3.length===0)loadAllSubjectsP3();}} className={"btn "+(modeP3==="manual"?"btn-primary":"btn-ghost")} style={{fontSize:11,padding:"5px 14px"}}>📋 과목 직접 선택</button>
+      </div>
+
+      {/* 자동 분석 */}
+      {modeP3==="auto"&&(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:subjectMatches.length>0?10:0}}>
+            <div style={{fontSize:11,color:"var(--text3)"}}>선택한 소주제와 연관된 교과를 AI가 자동으로 찾아줍니다.</div>
+            <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 12px",flexShrink:0}} onClick={fetchSubjectMatch} disabled={subjectLoading}>
+              {subjectLoading?"분석 중...":"🔍 교과 연계 분석"}
+            </button>
+          </div>
+          {subjectLoading&&<AILoad msg="소주제와 관련된 교과를 분석 중..."/>}
+          {subjectMatches.length>0&&(
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
+              {subjectMatches.map((m,i)=>(
+                <div key={i} style={{background:"var(--surface2)",borderRadius:"var(--r)",padding:"10px 14px",borderLeft:"3px solid var(--accent)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"var(--accent)"}}>📖 {m.subject}</div>
+                    <div style={{fontSize:10,background:"var(--accent-dim)",color:"var(--accent)",borderRadius:"10px",padding:"2px 8px",fontFamily:"var(--mono)"}}>연관도 {m.score||"-"}%</div>
+                  </div>
+                  {m.units?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}}>{m.units.map((u,j)=><span key={j} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",color:"var(--accent)",borderRadius:"4px",padding:"1px 7px",fontSize:11}}>{u}</span>)}</div>}
+                  {m.keywords?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}}>{m.keywords.map((k,j)=><span key={j} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",color:"var(--success)",borderRadius:"4px",padding:"1px 7px",fontSize:11}}>{k}</span>)}</div>}
+                  {m.reason&&<div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{m.reason}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 과목 직접 선택 */}
+      {modeP3==="manual"&&(
+        <div>
+          <div style={{fontSize:11,color:"var(--text3)",marginBottom:10}}>과목을 선택하면 핵심 키워드가 표시되고, 내 소주제와의 연계 가능성을 분석합니다.</div>
+          {subjectsLoadingP3&&<AILoad msg="과목 목록 불러오는 중..."/>}
+          {!subjectsLoadingP3&&allSubjectsP3.length===0&&(
+            <div style={{fontSize:12,color:"var(--text3)",textAlign:"center",padding:"16px 0"}}>등록된 과목이 없습니다. 관리자에게 평가기준 PDF 업로드를 요청하세요.</div>
+          )}
+          {allSubjectsP3.length>0&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+              {allSubjectsP3.map((s,i)=>(
+                <button key={i} onClick={()=>selectSubjectP3(s)}
+                  style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--r)",cursor:"pointer",
+                    background:selectedSubjectP3?.subject===s.subject?"var(--accent)":"var(--surface2)",
+                    color:selectedSubjectP3?.subject===s.subject?"#fff":"var(--text2)",
+                    border:"1px solid "+(selectedSubjectP3?.subject===s.subject?"var(--accent)":"var(--border2)"),
+                    fontWeight:selectedSubjectP3?.subject===s.subject?600:400}}>
+                  {s.subject}
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedSubjectP3&&(
+            <div style={{background:"var(--surface2)",border:"1px solid var(--border2)",borderRadius:"var(--r2)",padding:"14px 16px",marginBottom:12}}>
+              <div style={{fontSize:13,fontWeight:700,color:"var(--accent)",marginBottom:10}}>📖 {selectedSubjectP3.subject} — 핵심 정보</div>
+              {selectedSubjectP3.units?.length>0&&(
+                <div style={{marginBottom:8}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:5}}>단원 / 영역</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {selectedSubjectP3.units.map((u,j)=><span key={j} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",color:"var(--accent)",borderRadius:"4px",padding:"3px 9px",fontSize:12}}>{u}</span>)}
+                  </div>
+                </div>
+              )}
+              {selectedSubjectP3.keywords?.length>0&&(
+                <div style={{marginBottom:10}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:5}}>핵심 키워드 / 성취기준</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {selectedSubjectP3.keywords.map((k,j)=>(
+                      <span key={j} onClick={()=>{if(!data.keywords.includes(k))set(p=>({...p,keywords:[...p.keywords,k]}));}}
+                        style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",
+                          color:"var(--success)",borderRadius:"4px",padding:"3px 9px",fontSize:12,cursor:"pointer"}}
+                        title="클릭하면 내 키워드에 추가">
+                        {k} <span style={{fontSize:9,opacity:0.7}}>+</span>
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{fontSize:10,color:"var(--text3)",marginTop:5}}>💡 키워드를 클릭하면 내 키워드에 추가됩니다.</div>
+                </div>
+              )}
+              {selectedSubjectP3.summary&&<div style={{fontSize:12,color:"var(--text3)",lineHeight:1.6,borderTop:"1px solid var(--border)",paddingTop:8}}>{selectedSubjectP3.summary}</div>}
+              <button className="btn btn-primary" style={{width:"100%",marginTop:10,fontSize:12}} onClick={checkSubjectLinkP3} disabled={checkLoadingP3}>
+                {checkLoadingP3?"분석 중...":"🔗 내 소주제와의 연계 가능성 분석"}
+              </button>
+            </div>
+          )}
+          {checkLoadingP3&&<AILoad msg="연계 가능성을 분석 중..."/>}
+          {checkResultP3&&(
+            <div style={{background:checkResultP3.linked?"rgba(34,197,94,0.08)":"rgba(239,68,68,0.08)",
+              border:"1px solid "+(checkResultP3.linked?"rgba(34,197,94,0.4)":"rgba(239,68,68,0.4)"),
+              borderRadius:"var(--r2)",padding:"16px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <div style={{fontSize:24}}>{checkResultP3.linked?"✅":"❌"}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14,fontWeight:700,color:checkResultP3.linked?"var(--success)":"var(--danger)"}}>
+                    {checkResultP3.linked?"연계 가능":"연계 어려움"} — {selectedSubjectP3?.subject}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:4}}>
+                    <div style={{fontSize:11,color:"var(--text3)",flexShrink:0}}>연계도</div>
+                    <div style={{flex:1,height:6,background:"var(--border2)",borderRadius:3,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:(checkResultP3.score||0)+"%",
+                        background:checkResultP3.score>=70?"var(--success)":checkResultP3.score>=40?"var(--warn)":"var(--danger)",
+                        borderRadius:3}}/>
+                    </div>
+                    <div style={{fontSize:11,fontWeight:600,fontFamily:"var(--mono)",color:"var(--text2)",flexShrink:0}}>{checkResultP3.score||0}%</div>
+                  </div>
+                </div>
+              </div>
+              {checkResultP3.reason&&<div style={{fontSize:12,color:"var(--text2)",lineHeight:1.7,marginBottom:10,background:"var(--surface)",padding:"10px 12px",borderRadius:"var(--r)"}}>{checkResultP3.reason}</div>}
+              {checkResultP3.units?.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",marginBottom:4}}>연계 가능한 단원</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{checkResultP3.units.map((u,i)=><span key={i} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",color:"var(--accent)",borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{u}</span>)}</div></div>}
+              {checkResultP3.keywords?.length>0&&<div style={{marginBottom:8}}><div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",marginBottom:4}}>공통 키워드</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{checkResultP3.keywords.map((k,i)=><span key={i} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",color:"var(--success)",borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{k}</span>)}</div></div>}
+              {checkResultP3.suggestion&&<div style={{fontSize:11,color:"var(--accent)",background:"var(--accent-dim)",padding:"8px 12px",borderRadius:"var(--r)",marginTop:4}}>💡 {checkResultP3.suggestion}</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+
+    <NavRow page={3} onPrev={onPrev} onNext={onNext} nextDisabled={filledCount<count}/>
   </div>;
 }
+
 
 // ─── Page 4 ───────────────────────────────────────────────────────────────
 function Page4({data,set,onPrev,onNext}){
@@ -760,7 +1420,7 @@ JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
   };
 
   return <div className="fade">
-    <PH page={4} title="AI 탐구주제 추천" sub="난이도를 설정하고 AI가 추천하는 탐구주제를 선택하세요."/>
+    <PH page={3} title="AI 탐구주제 추천" sub="난이도를 설정하고 AI가 추천하는 탐구주제를 선택하세요."/>
 
     <div className="sec-label">탐구 난이도 설정</div>
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap"}}>
@@ -826,7 +1486,7 @@ JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
         </span>}
       </div>
     )}
-    <NavRow page={3} onPrev={onPrev} onNext={onNext} nextDisabled={!data.selectedTopic}/>
+    <NavRow page={2} onPrev={onPrev} onNext={onNext} nextDisabled={!data.selectedTopic}/>
   </div>;
 }
 
@@ -999,6 +1659,22 @@ function Page8({data,set,onPrev,onNext}){
   const [imgCaption,setImgCaption]=useState("");
   const fileRef=useRef();
 
+  // 전역 붙여넣기: 이미지 모달이 열린 상태에서 Ctrl+V/Cmd+V
+  useEffect(()=>{
+    const handleGlobalPaste=(e)=>{
+      if(imgModal===null) return;
+      if(!e.clipboardData) return;
+      const items=Array.from(e.clipboardData.items);
+      const imgItem=items.find(item=>item.type.startsWith("image/"));
+      if(!imgItem) return;
+      e.preventDefault();
+      const file=imgItem.getAsFile();
+      if(file) addImageFromFile(imgModal,file);
+    };
+    window.addEventListener("paste",handleGlobalPaste);
+    return ()=>window.removeEventListener("paste",handleGlobalPaste);
+  },[imgModal]);
+
   // ── helpers ──────────────────────────────────────────────────────────────
   const getImgs=(i)=>(data.bodyImages?.[`q${i}`]||[]);
   const setImgs=(i,imgs)=>set(p=>({...p,bodyImages:{...p.bodyImages,[`q${i}`]:imgs}}));
@@ -1012,6 +1688,17 @@ function Page8({data,set,onPrev,onNext}){
       setImgModal(null); setImgCaption(""); setImgUrlInput("");
     };
     reader.readAsDataURL(file);
+  };
+
+  // 클립보드 붙여넣기로 이미지 추가
+  const addImageFromPaste=(qIdx,e)=>{
+    if(!e.clipboardData) return;
+    const items=Array.from(e.clipboardData.items);
+    const imgItem=items.find(item=>item.type.startsWith("image/"));
+    if(!imgItem) return;
+    e.preventDefault();
+    const file=imgItem.getAsFile();
+    if(file) addImageFromFile(qIdx,file);
   };
 
   const addImageFromUrl=(qIdx)=>{
@@ -1063,24 +1750,37 @@ JSON: {"content":"본론 내용"}`);
 
   // ── Image modal ───────────────────────────────────────────────────────────
   const ImageModal=({qIdx})=>(
-    <div className="modal-bg" onClick={()=>{setImgModal(null);setImgUrlInput("");setImgCaption("");}}>
-      <div className="modal" onClick={e=>e.stopPropagation()}>
-        <h3 style={{marginBottom:16}}>🖼 이미지 추가 — 본론 {qIdx+1}</h3>
+    <div className="modal-bg" onClick={()=>{setImgModal(null);setImgUrlInput("");setImgCaption("");}}
+      onPaste={e=>addImageFromPaste(qIdx,e)}>
+      <div className="modal" onClick={e=>e.stopPropagation()}
+        onPaste={e=>addImageFromPaste(qIdx,e)}>
+        <h3 style={{marginBottom:12}}>🖼 이미지 추가 — 본론 {qIdx+1}</h3>
 
-        {/* Upload */}
+        {/* 붙여넣기 안내 */}
+        <div style={{background:"rgba(59,130,246,0.08)",border:"1px solid var(--accent)",borderRadius:"var(--r)",
+          padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:18}}>📋</span>
+          <div>
+            <div style={{fontSize:12,fontWeight:600,color:"var(--accent)"}}>Ctrl+V / Cmd+V 로 붙여넣기 지원</div>
+            <div style={{fontSize:11,color:"var(--text3)"}}>스크린샷이나 복사한 이미지를 이 창이 열린 상태에서 바로 붙여넣을 수 있습니다.</div>
+          </div>
+        </div>
+
+        {/* Upload + 붙여넣기 드롭존 */}
         <div style={{background:"var(--surface2)",border:"2px dashed var(--border2)",borderRadius:"var(--r2)",
-          padding:"24px",textAlign:"center",marginBottom:14,cursor:"pointer"}}
+          padding:"20px",textAlign:"center",marginBottom:14,cursor:"pointer"}}
           onClick={()=>fileRef.current&&(fileRef.current.qIdx=qIdx)&&fileRef.current.click()}
           onDragOver={e=>e.preventDefault()}
-          onDrop={e=>{e.preventDefault();addImageFromFile(qIdx,e.dataTransfer.files[0]);}}>
-          <div style={{fontSize:28,marginBottom:6}}>📁</div>
+          onDrop={e=>{e.preventDefault();addImageFromFile(qIdx,e.dataTransfer.files[0]);}}
+          onPaste={e=>addImageFromPaste(qIdx,e)}>
+          <div style={{fontSize:26,marginBottom:6}}>📁</div>
           <div style={{fontSize:13,color:"var(--text2)"}}>클릭하거나 파일을 드래그하여 업로드</div>
-          <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>JPG, PNG, GIF, WEBP 지원</div>
+          <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>JPG, PNG, GIF, WEBP · Ctrl+V 붙여넣기도 가능</div>
         </div>
         <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}}
           onChange={e=>{if(e.target.files[0]) addImageFromFile(fileRef.current.qIdx,e.target.files[0]); e.target.value="";}}/>
 
-        <div style={{display:"flex",alignItems:"center",gap:10,margin:"14px 0",color:"var(--text3)",fontSize:12}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,margin:"12px 0",color:"var(--text3)",fontSize:12}}>
           <div style={{flex:1,height:1,background:"var(--border)"}}/>또는<div style={{flex:1,height:1,background:"var(--border)"}}/>
         </div>
 
@@ -1384,6 +2084,9 @@ function buildDocContent(data, includeEval=false, useCorrected=false){
     body+=divider;
     const ev=data.selfEval||{};
     const cr=data.correctedEval||{};
+    // 자기평가서 전용: keepn으로 페이지 분리 방지, 간격 최소화
+    const evalH=(t)=>`{\\pard\\keepn\\sb120\\sa60\\b\\fs22\\cf2 ${esc(t)}\\par}\n`;
+    const evalP=(t)=>`{\\pard\\keep\\sa120\\fs22 ${esc(t)}\\par}\n`;
     const evalFields=[
       {key:"motivation",label:"동기"},
       {key:"process",label:"과정"},
@@ -1393,7 +2096,7 @@ function buildDocContent(data, includeEval=false, useCorrected=false){
     ];
     evalFields.forEach(f=>{
       const val=cr[f.key]||ev[f.key]||"";
-      if(val){ body+=h3(f.label); body+=para(val); }
+      if(val){ body+=evalH(f.label); body+=evalP(val); }
     });
   }
 
@@ -1905,6 +2608,7 @@ JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내
 function MyReportsModal({user,onClose,onLoad}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
+  const [showProfile,setShowProfile]=useState(false);
 
   const loadReports=async()=>{
     setLoading(true);
@@ -1986,13 +2690,12 @@ function MyReportsModal({user,onClose,onLoad}){
 
 
 
-// ─── Rubric Manager (평가기준 PDF 업로드 & 관리) ──────────────────────────
+// ─── Rubric Manager (전체 평가기준 PDF 업로드 & 교과 매핑) ─────────────────
 function RubricManager(){
   const [rubrics,setRubrics]=useState([]);
   const [loading,setLoading]=useState(false);
   const [uploading,setUploading]=useState(false);
   const [msg,setMsg]=useState("");
-  const [subjectName,setSubjectName]=useState("");
   const fileRef=useRef();
 
   useEffect(()=>{ loadRubrics(); },[]);
@@ -2003,42 +2706,81 @@ function RubricManager(){
       await waitFb();
       const {collection,getDocs}=window._fbFns;
       const snap=await getDocs(collection(window._fbDb,"rubrics"));
-      const list=snap.docs.map(d=>({id:d.id,...d.data()}));
-      list.sort((a,b)=>(a.subject||"").localeCompare(b.subject||""));
+      const list=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>!r.deleted);
+      list.sort((a,b)=>(a.uploadedAt?.toMillis?.())||0 < (b.uploadedAt?.toMillis?.())||0 ? 1:-1);
       setRubrics(list);
     }catch(e){console.error(e);}
     setLoading(false);
   };
 
+  // PDF 텍스트 추출 (pdf.js CDN 사용) — 페이지 수 제한 우회
+  const extractPDFText=async(file)=>{
+    return new Promise(async(resolve,reject)=>{
+      try{
+        // pdf.js 동적 로드
+        if(!window.pdfjsLib){
+          await new Promise((r,e)=>{
+            const s=document.createElement("script");
+            s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+            s.onload=r; s.onerror=e;
+            document.head.appendChild(s);
+          });
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc=
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+        const ab=await file.arrayBuffer();
+        const pdf=await window.pdfjsLib.getDocument({data:ab}).promise;
+        const total=pdf.numPages;
+        let text="";
+        // 최대 100페이지씩 처리 (너무 긴 텍스트 방지)
+        const maxPages=Math.min(total,200);
+        for(let i=1;i<=maxPages;i++){
+          const page=await pdf.getPage(i);
+          const content=await page.getTextContent();
+          text+=content.items.map(item=>item.str).join(" ")+"\n";
+        }
+        if(total>200) text+="\n[이하 "+(total-200)+"페이지 생략]";
+        resolve(text.slice(0,80000)); // 최대 8만자
+      }catch(err){reject(err);}
+    });
+  };
+
   const uploadPDF=async(file)=>{
     if(!file||!file.type.includes("pdf")){setMsg("❌ PDF 파일만 업로드 가능합니다.");return;}
-    if(!subjectName.trim()){setMsg("❌ 과목명을 먼저 입력하세요.");return;}
     setUploading(true);setMsg("");
     try{
-      // PDF → base64 변환 후 Gemini로 텍스트 추출
-      const base64=await new Promise((res,rej)=>{
-        const r=new FileReader();
-        r.onload=()=>res(r.result.split(",")[1]);
-        r.onerror=rej;
-        r.readAsDataURL(file);
-      });
-
-      // Gemini Vision으로 PDF 텍스트 추출
       await waitFb();
       const {doc,getDoc}=window._fbFns;
       const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
       const key=snap.exists()?snap.data().apiKey:GEMINI_KEY;
       if(!key){setMsg("❌ Gemini API 키가 설정되지 않았습니다.");setUploading(false);return;}
 
-      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,{
+      setMsg("📄 PDF 텍스트 추출 중...");
+      let pdfText="";
+      try{
+        pdfText=await extractPDFText(file);
+      }catch(e){
+        setMsg("⚠️ PDF 텍스트 추출 실패, 파일명으로 처리합니다.");
+        pdfText=file.name;
+      }
+
+      setMsg("🔍 AI가 교과 정보를 분석 중...");
+
+      const prompt="다음은 고등학교 전체 교과 평가기준표 PDF에서 추출한 텍스트입니다.\n\n"+
+        "아래 형식으로 각 교과목의 정보를 추출해주세요.\n"+
+        "각 교과목마다:\n1. 교과(군)와 과목명\n2. 단원/영역 목록 (모두 나열)\n"+
+        "3. 핵심 키워드 목록 (성취기준, 평가요소에서 추출)\n4. 간략 요약 (1~2문장)\n\n"+
+        "JSON으로만 반환 (설명 없이):\n"+
+        "{\"subjects\":[{\"subject\":\"과목명\",\"units\":[\"단원1\",\"단원2\"],"+
+        "\"keywords\":[\"키워드1\",\"키워드2\"],\"summary\":\"요약\"}]}\n\n"+
+        "PDF 텍스트:\n"+pdfText;
+
+      const res=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",{
         method:"POST",
         headers:{"Content-Type":"application/json","x-goog-api-key":key},
         body:JSON.stringify({
-          contents:[{parts:[
-            {inline_data:{mime_type:"application/pdf",data:base64}},
-            {text:"이 PDF는 고등학교 \""+subjectName+"\" 과목의 평가기준표입니다.\n다음 형식으로 추출해주세요:\n1. 과목명\n2. 단원/영역 목록 (모두 나열)\n3. 핵심 키워드 목록 (평가요소, 성취기준 키워드)\n4. 평가기준 요약\n\nJSON으로만 반환:\n{\"subject\":\"과목명\",\"units\":[\"단원1\",\"단원2\"],\"keywords\":[\"키워드1\",\"키워드2\"],\"summary\":\"평가기준 요약\"}"}
-          ],role:"user"}],
-          generationConfig:{temperature:0.2,maxOutputTokens:4096}
+          contents:[{parts:[{text:prompt}],role:"user"}],
+          generationConfig:{temperature:0.1,maxOutputTokens:8192}
         })
       });
 
@@ -2048,40 +2790,29 @@ function RubricManager(){
       const cleaned=raw.replace(/```json|```/g,"").trim();
       let parsed;
       try{parsed=JSON.parse(cleaned);}
-      catch{parsed={subject:subjectName,units:[],keywords:[],summary:raw.slice(0,500)};}
+      catch{parsed={subjects:[{subject:file.name.replace(".pdf",""),units:[],keywords:[],summary:raw.slice(0,300)}]};}
 
-      // Firestore에 저장
+      const subjects=parsed.subjects||[parsed];
       const {doc:fbDoc,setDoc:fbSet,serverTimestamp}=window._fbFns;
-      const id="rubric_"+subjectName.replace(/\s/g,"_")+"_"+Date.now();
-      await fbSet(fbDoc(window._fbDb,"rubrics",id),{
-        subject:subjectName,
+      const batchId="rubric_"+Date.now();
+      await fbSet(fbDoc(window._fbDb,"rubrics",batchId),{
         filename:file.name,
-        units:parsed.units||[],
-        keywords:parsed.keywords||[],
-        summary:parsed.summary||"",
-        uploadedAt:serverTimestamp()
+        subjects:subjects,
+        uploadedAt:serverTimestamp(),
+        deleted:false
       });
-
-      setMsg(`✅ "${subjectName}" 평가기준이 등록되었습니다! (단원 ${(parsed.units||[]).length}개, 키워드 ${(parsed.keywords||[]).length}개 추출)`);
-      setSubjectName("");
+      setMsg("✅ "+subjects.length+"개 교과의 평가기준이 등록되었습니다! ("+subjects.map(s=>s.subject).join(", ")+")");
       loadRubrics();
     }catch(e){setMsg("❌ 오류: "+e.message);}
     setUploading(false);
   };
 
-  const deleteRubric=async(id,subject)=>{
-    if(!window.confirm(`"${subject}" 평가기준을 삭제하시겠습니까?`))return;
+  const deleteRubric=async(id,name)=>{
+    if(!window.confirm("\""+name+"\" 파일의 평가기준을 삭제하시겠습니까?"))return;
     try{
       await waitFb();
-      // Firestore doc 삭제 (실제 삭제)
-      const {doc,deleteDoc}=window._fbFns;
-      if(doc&&deleteDoc){
-        await deleteDoc(doc(window._fbDb,"rubrics",id));
-      }else{
-        // deleteDoc 없으면 비활성화
-        const {doc:fbDoc,updateDoc}=window._fbFns;
-        await updateDoc(fbDoc(window._fbDb,"rubrics",id),{deleted:true});
-      }
+      const {doc,updateDoc,serverTimestamp}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"rubrics",id),{deleted:true,deletedAt:serverTimestamp()});
       setRubrics(prev=>prev.filter(r=>r.id!==id));
     }catch(e){alert("삭제 실패: "+e.message);}
   };
@@ -2089,66 +2820,82 @@ function RubricManager(){
   return <div className="fade">
     <div style={{marginBottom:28}}>
       <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>📚 평가기준 관리</div>
-      <div style={{fontSize:13,color:"var(--text3)"}}>과목별 평가기준 PDF를 업로드하면 AI가 단원·키워드를 추출합니다. 학생들이 탐구주제 선정 시 과목 연계를 추천받을 수 있습니다.</div>
+      <div style={{fontSize:13,color:"var(--text3)"}}>
+        전체 교과 평가기준 PDF를 업로드하면 AI가 과목별 단원·키워드를 자동 추출합니다.<br/>
+        학생이 탐구 소주제를 입력하면 관련 교과와 단원을 자동으로 연결합니다.
+      </div>
     </div>
 
     {/* 업로드 영역 */}
-    <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"20px",marginBottom:20}}>
-      <div className="sec-label" style={{marginBottom:12}}>새 평가기준 PDF 업로드</div>
-      <div className="fg"><label>과목명 *</label>
-        <input type="text" placeholder="예: 생명과학Ⅱ, 물리학Ⅰ, 사회문화..." value={subjectName} onChange={e=>setSubjectName(e.target.value)}/>
-      </div>
-      <div style={{background:"var(--surface)",border:"2px dashed var(--border2)",borderRadius:"var(--r2)",padding:"24px",textAlign:"center",cursor:"pointer",marginBottom:12}}
+    <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"24px",marginBottom:24}}>
+      <div className="sec-label" style={{marginBottom:12}}>📄 평가기준 PDF 업로드</div>
+      <div style={{background:"var(--surface)",border:"2px dashed var(--border2)",borderRadius:"var(--r2)",
+        padding:"32px",textAlign:"center",cursor:"pointer",transition:"all .2s",marginBottom:12}}
         onClick={()=>fileRef.current?.click()}
         onDragOver={e=>e.preventDefault()}
         onDrop={e=>{e.preventDefault();uploadPDF(e.dataTransfer.files[0]);}}>
-        <div style={{fontSize:28,marginBottom:6}}>📄</div>
-        <div style={{fontSize:13,color:"var(--text2)"}}>클릭하거나 PDF 파일을 드래그하여 업로드</div>
-        <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>PDF 파일만 지원 · AI가 자동으로 텍스트와 키워드 추출</div>
+        <div style={{fontSize:32,marginBottom:8}}>📄</div>
+        <div style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:4}}>클릭하거나 PDF 파일을 드래그하여 업로드</div>
+        <div style={{fontSize:12,color:"var(--text3)"}}>전체 교과 평가기준 PDF 파일 · AI가 과목별로 자동 분석</div>
       </div>
-      <input ref={fileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={e=>{if(e.target.files[0])uploadPDF(e.target.files[0]);e.target.value="";}}/>
-      {uploading&&<AILoad msg="PDF에서 텍스트·단원·키워드 추출 중..." sub="Gemini AI가 평가기준을 분석합니다..."/>}
-      {msg&&<div style={{fontSize:13,color:msg.startsWith("✅")?"var(--success)":"var(--danger)",marginTop:8}}>{msg}</div>}
+      <input ref={fileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={e=>{if(e.target.files[0])uploadPDF(e.target.files[0]);}}/>
+      {uploading&&<AILoad msg={msg||"PDF 분석 중..."}/>}
+      {!uploading&&msg&&<div style={{fontSize:13,color:msg.startsWith("✅")?"var(--success)":"var(--danger)",marginTop:10,lineHeight:1.6}}>{msg}</div>}
     </div>
 
     {/* 등록된 평가기준 목록 */}
-    <div className="sec-label">등록된 평가기준 ({rubrics.filter(r=>!r.deleted).length}개)</div>
+    <div className="sec-label">등록된 평가기준 파일 ({rubrics.length}개)</div>
     {loading&&<AILoad msg="불러오는 중..."/>}
-    {!loading&&rubrics.filter(r=>!r.deleted).length===0&&(
-      <div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"24px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)"}}>
+    {!loading&&rubrics.length===0&&(
+      <div style={{color:"var(--text3)",fontSize:13,textAlign:"center",padding:"32px",background:"var(--surface)",borderRadius:"var(--r2)",border:"1px solid var(--border)"}}>
         등록된 평가기준이 없습니다. PDF를 업로드해주세요.
       </div>
     )}
-    {rubrics.filter(r=>!r.deleted).map(r=>(
+    {rubrics.map(r=>(
       <div key={r.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"16px",marginBottom:10}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div>
-            <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{r.subject}</div>
-            <div style={{fontSize:11,color:"var(--text3)",marginTop:3,fontFamily:"var(--mono)"}}>{r.filename} · {r.uploadedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}</div>
+            <div style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>{r.filename||"평가기준 파일"}</div>
+            <div style={{fontSize:11,color:"var(--text3)",marginTop:2,fontFamily:"var(--mono)"}}>
+              {r.subjects?.length||0}개 교과 · {r.uploadedAt?.toDate?.()?.toLocaleDateString("ko-KR")||""}
+            </div>
           </div>
-          <button className="btn btn-danger" style={{fontSize:11,padding:"3px 9px"}} onClick={()=>deleteRubric(r.id,r.subject)}>삭제</button>
+          <button className="btn btn-danger" style={{fontSize:11,padding:"4px 10px"}}
+            onClick={()=>deleteRubric(r.id,r.filename||"이 파일")}>🗑 삭제</button>
         </div>
-        {r.units?.length>0&&(
-          <div style={{marginBottom:8}}>
-            <div style={{fontSize:11,color:"var(--accent)",fontFamily:"var(--mono)",letterSpacing:1,marginBottom:4}}>단원/영역</div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {r.units.slice(0,8).map((u,i)=><span key={i} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",borderRadius:4,padding:"2px 8px",fontSize:11,color:"var(--text2)"}}>{u}</span>)}
-              {r.units.length>8&&<span style={{fontSize:11,color:"var(--text3)"}}>+{r.units.length-8}개</span>}
+        {/* 교과 목록 */}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {(r.subjects||[]).map((s,i)=>(
+            <div key={i} style={{background:"var(--surface2)",borderRadius:"var(--r)",padding:"10px 14px"}}>
+              <div style={{fontSize:13,fontWeight:600,color:"var(--accent)",marginBottom:5}}>📖 {s.subject}</div>
+              {s.units?.length>0&&(
+                <div style={{marginBottom:5}}>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:3}}>단원</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {s.units.slice(0,8).map((u,j)=>(
+                      <span key={j} style={{background:"var(--accent-dim)",border:"1px solid var(--accent)",color:"var(--accent)",
+                        borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{u}</span>
+                    ))}
+                    {s.units.length>8&&<span style={{fontSize:11,color:"var(--text3)"}}>+{s.units.length-8}개</span>}
+                  </div>
+                </div>
+              )}
+              {s.keywords?.length>0&&(
+                <div>
+                  <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--mono)",letterSpacing:"1px",marginBottom:3}}>키워드</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {s.keywords.slice(0,10).map((k,j)=>(
+                      <span key={j} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",color:"var(--success)",
+                        borderRadius:"4px",padding:"2px 8px",fontSize:11}}>{k}</span>
+                    ))}
+                    {s.keywords.length>10&&<span style={{fontSize:11,color:"var(--text3)"}}>+{s.keywords.length-10}개</span>}
+                  </div>
+                </div>
+              )}
+              {s.summary&&<div style={{marginTop:6,fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{s.summary}</div>}
             </div>
-          </div>
-        )}
-        {r.keywords?.length>0&&(
-          <div>
-            <div style={{fontSize:11,color:"var(--success)",fontFamily:"var(--mono)",letterSpacing:1,marginBottom:4}}>키워드</div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {r.keywords.slice(0,10).map((k,i)=><span key={i} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:4,padding:"2px 8px",fontSize:11,color:"var(--text2)"}}>{k}</span>)}
-              {r.keywords.length>10&&<span style={{fontSize:11,color:"var(--text3)"}}>+{r.keywords.length-10}개</span>}
-            </div>
-          </div>
-        )}
-        {r.summary&&(
-          <div style={{marginTop:8,fontSize:12,color:"var(--text3)",lineHeight:1.6,background:"var(--surface2)",borderRadius:"var(--r)",padding:"8px 10px"}}>{r.summary.slice(0,200)}{r.summary.length>200?"...":""}</div>
-        )}
+          ))}
+        </div>
       </div>
     ))}
   </div>;
@@ -2223,7 +2970,13 @@ function AdminScreen({user,onLogout}){
       await updateDoc(doc(window._fbDb,"users",editUserModal.id),{
         name:editUserModal.name,school:editUserModal.school,grade:editUserModal.grade
       });
-      alert("학생 정보가 수정되었습니다!");
+      // 비밀번호 초기화 (관리자 전용 — Firebase Admin SDK 없이는 불가)
+      // 안내 메시지로 대체
+      if(editUserModal.newPw){
+        alert("학생 정보가 수정되었습니다!\n\n⚠ 비밀번호 초기화는 Firebase 콘솔에서 직접 설정하거나\n학생이 직접 비밀번호를 변경해야 합니다.");
+      } else {
+        alert("학생 정보가 수정되었습니다!");
+      }
       setEditUserModal(null);fetchAll();
     }catch(e){alert("수정 실패: "+e.message);}
   };
@@ -2568,6 +3321,10 @@ function AdminScreen({user,onLogout}){
             {["1학년","2학년","3학년"].map(g=><option key={g}>{g}</option>)}
           </select>
         </div>
+        <div className="fg"><label>비밀번호 초기화 (선택)</label>
+          <input type="password" placeholder="새 비밀번호 입력 시 초기화됨 (빈칸이면 유지)"
+            value={editUserModal.newPw||""} onChange={e=>setEditUserModal(p=>({...p,newPw:e.target.value}))}/>
+        </div>
         <div style={{display:"flex",gap:10,marginTop:8}}>
           <button className="btn btn-primary" style={{flex:1}} onClick={saveEditUser}>✅ 저장</button>
           <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setEditUserModal(null)}>취소</button>
@@ -2681,7 +3438,127 @@ ${(r.data.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin
 }
 
 
-function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel}){
+
+// ─── 사용자 정보 수정 모달 ─────────────────────────────────────────────────
+function UserProfileModal({user, onClose, onUpdate}){
+  const [name,setName]=useState(user.name||"");
+  const [school,setSchool]=useState(user.school||"");
+  const [grade,setGrade]=useState(user.grade||"");
+  const [pwCurr,setPwCurr]=useState("");
+  const [pwNew,setPwNew]=useState("");
+  const [pwNew2,setPwNew2]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState("");
+  const [msg,setMsg]=useState("");
+  const [tab,setTab]=useState("info"); // "info" | "pw"
+
+  const saveInfo=async()=>{
+    if(!name||!school||!grade){setErr("이름, 학교, 학년은 필수입니다.");return;}
+    setLoading(true);setErr("");setMsg("");
+    try{
+      await waitFb();
+      const {doc,updateDoc}=window._fbFns;
+      await updateDoc(doc(window._fbDb,"users",user.uid),{name,school,grade});
+      setMsg("✅ 정보가 수정되었습니다.");
+      onUpdate({...user,name,school,grade});
+    }catch(e){setErr("수정 실패: "+e.message);}
+    setLoading(false);
+  };
+
+  const changePw=async()=>{
+    if(!pwCurr){setErr("현재 비밀번호를 입력하세요.");return;}
+    if(!pwNew||pwNew.length<6){setErr("새 비밀번호는 6자 이상이어야 합니다.");return;}
+    if(pwNew!==pwNew2){setErr("새 비밀번호가 일치하지 않습니다.");return;}
+    setLoading(true);setErr("");setMsg("");
+    try{
+      await waitFb();
+      const {signInWithEmailAndPassword}=window._fbFns;
+      // 재인증
+      await signInWithEmailAndPassword(window._fbAuth,user.email,pwCurr);
+      // 비밀번호 변경 (Firebase compat SDK)
+      await window._fbAuth.currentUser.updatePassword(pwNew);
+      setMsg("✅ 비밀번호가 변경되었습니다.");
+      setPwCurr("");setPwNew("");setPwNew2("");
+    }catch(e){
+      const code=e.code||"";
+      if(code==="auth/wrong-password"||code==="auth/invalid-credential")
+        setErr("현재 비밀번호가 올바르지 않습니다.");
+      else setErr("변경 실패: "+e.message);
+    }
+    setLoading(false);
+  };
+
+  return <div className="modal-bg" onClick={onClose}>
+    <div className="modal" style={{maxWidth:480}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0}}>👤 내 정보 수정</h3>
+        <button className="btn btn-ghost" style={{fontSize:11}} onClick={onClose}>닫기</button>
+      </div>
+
+      {/* 기본 정보 */}
+      <div style={{background:"var(--surface2)",borderRadius:"var(--r)",padding:"10px 14px",marginBottom:16,fontSize:12,color:"var(--text3)"}}>
+        <div>📧 {user.email}</div>
+        <div style={{marginTop:4}}>🪙 보유 코인: <strong style={{color:"var(--warn)"}}>{user.coins||0}개</strong></div>
+      </div>
+
+      {/* 탭 */}
+      <div style={{display:"flex",gap:6,marginBottom:16}}>
+        <button onClick={()=>{setTab("info");setErr("");setMsg("");}}
+          className={"btn "+(tab==="info"?"btn-primary":"btn-ghost")} style={{flex:1,fontSize:12}}>
+          기본 정보
+        </button>
+        <button onClick={()=>{setTab("pw");setErr("");setMsg("");}}
+          className={"btn "+(tab==="pw"?"btn-primary":"btn-ghost")} style={{flex:1,fontSize:12}}>
+          비밀번호 변경
+        </button>
+      </div>
+
+      {err&&<div className="err-box" style={{marginBottom:12}}>{err}</div>}
+      {msg&&<div className="info-box" style={{marginBottom:12}}>{msg}</div>}
+
+      {tab==="info"&&<>
+        <div className="fr2">
+          <div className="fg"><label>이름</label>
+            <input type="text" value={name} onChange={e=>setName(e.target.value)}/>
+          </div>
+          <div className="fg"><label>학교명</label>
+            <input type="text" value={school} onChange={e=>setSchool(e.target.value)}/>
+          </div>
+        </div>
+        <div className="fg"><label>학년</label>
+          <div style={{display:"flex",gap:8}}>
+            {["1학년","2학년","3학년"].map(g=>(
+              <button key={g} onClick={()=>setGrade(g)}
+                className={"btn "+(grade===g?"btn-primary":"btn-ghost")}
+                style={{flex:1,fontSize:13}}>{g}</button>
+            ))}
+          </div>
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",marginTop:8}} onClick={saveInfo} disabled={loading}>
+          {loading?"저장 중...":"✅ 정보 저장"}
+        </button>
+      </>}
+
+      {tab==="pw"&&<>
+        <div className="fg"><label>현재 비밀번호</label>
+          <input type="password" placeholder="현재 비밀번호" value={pwCurr} onChange={e=>setPwCurr(e.target.value)}/>
+        </div>
+        <div className="fg"><label>새 비밀번호 (6자 이상)</label>
+          <input type="password" placeholder="새 비밀번호" value={pwNew} onChange={e=>setPwNew(e.target.value)}/>
+        </div>
+        <div className="fg"><label>새 비밀번호 확인</label>
+          <input type="password" placeholder="새 비밀번호 확인" value={pwNew2} onChange={e=>setPwNew2(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&changePw()}/>
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",marginTop:8}} onClick={changePw} disabled={loading}>
+          {loading?"변경 중...":"🔒 비밀번호 변경"}
+        </button>
+      </>}
+    </div>
+  </div>;
+}
+
+function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoinConfirm,onCoinCancel,onUserUpdate}){
   const [reports,setReports]=useState([]);
   const [loading,setLoading]=useState(true);
 
@@ -2715,6 +3592,7 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <div className="coin-badge">🪙 {user.coins||0}</div>
+          <button className="btn btn-ghost" style={{fontSize:11}} onClick={()=>setShowProfile(true)}>👤 내 정보</button>
           <button className="btn btn-ghost" style={{fontSize:11}} onClick={onLogout}>로그아웃</button>
         </div>
       </div>
@@ -2772,6 +3650,8 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
       ))}
     </div>
     {showCoin&&<CoinCheckModal coins={user.coins||0} onConfirm={onCoinConfirm} onCancel={onCoinCancel}/>}
+    {showProfile&&<UserProfileModal user={user} onClose={()=>setShowProfile(false)}
+      onUpdate={(u)=>{onUserUpdate&&onUserUpdate(u);setShowProfile(false);}}/>}
   </div>;
 }
 
@@ -2825,6 +3705,7 @@ function P13({data,set,onPrev,onFinish}){
       for(let i=0;i<sections.length;i++){
         const s=sections[i];
         setProgress(`(${i+1}/${total}) ${s.label.replace(/[\[\]]/g,"")} 변환 중...`);
+        if(i>0) await sleep(1500); // 연속 호출 간 1.5초 딜레이
         const r=await gemini(`다음 텍스트를 아래 말투 스타일로 변환해주세요.
 
 스타일: ${styleDesc[style]}
@@ -3029,8 +3910,8 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
   const pages=[
     <Page1 data={data} set={setData} user={user} onNext={()=>go(1)}/>,
     <Page2 data={data} set={setData} onPrev={()=>go(0)} onNext={()=>go(2)}/>,
-    <Page3 data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)}/>,
-    <Page4 data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)}/>,
+    <Page4 data={data} set={setData} onPrev={()=>go(1)} onNext={()=>go(3)}/>,
+    <Page3 data={data} set={setData} onPrev={()=>go(2)} onNext={()=>go(4)}/>,
     <Page5 data={data} set={setData} onPrev={()=>go(3)} onNext={()=>go(5)}/>,
     <Page6 data={data} set={setData} onPrev={()=>go(4)} onNext={()=>go(6)}/>,
     <Page7 data={data} set={setData} onPrev={()=>go(5)} onNext={()=>go(7)}/>,
@@ -3042,7 +3923,7 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
     <P13 data={data} set={setData} onPrev={()=>go(11)} onFinish={onGoHome}/>,
   ];
 
-  const PAGES_NAMES=["기본정보","관심분야","질문구성","주제추천","목차","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
+  const PAGES_NAMES=["기본정보","관심분야","주제추천","소주제구성","목차","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
   return <div className="shell">
     <div className="topbar">
@@ -3050,7 +3931,8 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
       <div className="prog-track">
         {PAGES_NAMES.map((name,i)=>(
           <div key={i} className={`prog-dot ${i===page?"active":i<page?"done":""}`}
-            onClick={()=>go(i)} title={name}/>
+            onClick={()=>{ if(page>=4&&i<4){alert("소주제 구성 이전 페이지로는 돌아갈 수 없습니다.");return;} go(i); }} title={name}
+            style={{cursor:page>=4&&i<4?"not-allowed":"pointer",opacity:page>=4&&i<4?0.4:1}}/>
         ))}
       </div>
       <div className="topbar-right">
@@ -3078,19 +3960,29 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
 
 // ─── Login Screen ─────────────────────────────────────────────────────────
 function LoginScreen({onLogin}){
+  const [tab,setTab]=useState("login"); // "login"|"signup"|"guest"
   const [email,setEmail]=useState("");
   const [pw,setPw]=useState("");
+  const [pw2,setPw2]=useState("");
+  const [name,setName]=useState("");
+  const [school,setSchool]=useState("");
+  const [grade,setGrade]=useState("");
+  const [phone,setPhone]=useState("");
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState("");
+  const [msg,setMsg]=useState("");
 
-  const errMsg=(code)=>({
+  const errMsg=(c)=>({
     "auth/user-not-found":"등록되지 않은 계정입니다.",
     "auth/wrong-password":"비밀번호가 올바르지 않습니다.",
     "auth/invalid-email":"이메일 형식이 올바르지 않습니다.",
     "auth/invalid-credential":"이메일 또는 비밀번호가 올바르지 않습니다.",
     "auth/too-many-requests":"잠시 후 다시 시도해주세요.",
-  }[code]||"오류가 발생했습니다. 다시 시도해주세요.");
+    "auth/email-already-in-use":"이미 사용 중인 이메일입니다.",
+    "auth/weak-password":"비밀번호는 6자 이상이어야 합니다.",
+  }[c]||"오류가 발생했습니다. 다시 시도해주세요.");
 
+  // ── 로그인 ────────────────────────────────────────────────────────────────
   const doLogin=async()=>{
     if(!email||!pw){setErr("이메일과 비밀번호를 입력하세요.");return;}
     setLoading(true);setErr("");
@@ -3105,31 +3997,210 @@ function LoginScreen({onLogin}){
     setLoading(false);
   };
 
+  // ── 회원가입 (코인 1개 지급) ─────────────────────────────────────────────
+  const doSignup=async()=>{
+    if(!email||!pw||!pw2||!name||!school||!grade){setErr("모든 항목을 입력하세요.");return;}
+    if(pw!==pw2){setErr("비밀번호가 일치하지 않습니다.");return;}
+    if(pw.length<6){setErr("비밀번호는 6자 이상이어야 합니다.");return;}
+    setLoading(true);setErr("");
+    try{
+      await waitFb();
+      const {createUserWithEmailAndPassword,doc,setDoc,serverTimestamp}=window._fbFns;
+      const cred=await createUserWithEmailAndPassword(window._fbAuth,email,pw);
+      await setDoc(doc(window._fbDb,"users",cred.user.uid),{
+        email,name,school,grade,
+        coins:1, // 신규 회원가입 코인 1개 지급
+        role:"student",
+        createdAt:serverTimestamp()
+      });
+      setMsg("✅ 회원가입이 완료되었습니다!\n코인 1개가 지급되었습니다. 바로 시작하세요!");
+      setTab("login");
+      setEmail("");setPw("");setPw2("");setName("");setSchool("");setGrade("");
+    }catch(e){setErr(errMsg(e.code));}
+    setLoading(false);
+  };
+
+  // ── 비회원 이용 (코인 1개, 로컬 세션) ────────────────────────────────────
+  const doGuest=async()=>{
+    if(!name||!school||!grade||!phone){setErr("이름, 학교, 학년, 연락처를 모두 입력하세요.");return;}
+    const phoneRegex=/^[0-9]{10,11}$/;
+    if(!phoneRegex.test(phone.replace(/-/g,""))){setErr("올바른 연락처를 입력하세요. (예: 010-1234-5678)");return;}
+    setLoading(true);setErr("");
+    try{
+      // Firestore에 비회원 기록 저장
+      await waitFb();
+      const {doc,setDoc,serverTimestamp}=window._fbFns;
+      const guestId="guest_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
+      await setDoc(doc(window._fbDb,"guests",guestId),{
+        name,school,grade,phone,
+        coins:1,
+        createdAt:serverTimestamp()
+      });
+      // 비회원은 Firebase Auth 없이 로컬 세션으로 로그인
+      onLogin({
+        uid:guestId,
+        name,school,grade,phone,
+        email:"비회원",
+        coins:1,
+        role:"guest"
+      });
+    }catch(e){
+      // Firestore 저장 실패해도 비회원으로 진행 (로컬만)
+      const guestId="guest_local_"+Date.now();
+      onLogin({
+        uid:guestId,
+        name,school,grade,phone,
+        email:"비회원",
+        coins:1,
+        role:"guest"
+      });
+    }
+    setLoading(false);
+  };
+
+  const switchTab=(t)=>{setTab(t);setErr("");setMsg("");};
+
   return <div className="login-wrap">
     <div className="login-box fade">
       <div className="login-logo">STUDY<span>.</span>AI</div>
       <div className="login-title">탐구보고서 AI 시스템</div>
-      <div className="login-sub">학생 전용 로그인</div>
-      {err&&<div className="err-box">{err}</div>}
-      <div className="fg"><label>이메일</label>
-        <input type="email" placeholder="student@school.kr" value={email}
-          onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+
+      {/* 탭 */}
+      <div style={{display:"flex",gap:0,marginBottom:20,borderRadius:"var(--r)",overflow:"hidden",border:"1px solid var(--border)"}}>
+        {[["login","로그인"],["signup","회원가입"],["guest","비회원 이용"]].map(([key,label])=>(
+          <button key={key} onClick={()=>switchTab(key)}
+            style={{flex:1,padding:"9px 4px",fontSize:12,fontWeight:tab===key?700:400,
+              background:tab===key?"var(--accent)":"var(--surface2)",
+              color:tab===key?"#fff":"var(--text3)",border:"none",cursor:"pointer",
+              borderRight:key!=="guest"?"1px solid var(--border)":"none"}}>
+            {label}
+          </button>
+        ))}
       </div>
-      <div className="fg"><label>비밀번호</label>
-        <input type="password" placeholder="••••••••" value={pw}
-          onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
-      </div>
-      <button className="btn btn-primary" style={{width:"100%",marginTop:8,padding:"12px"}}
-        onClick={doLogin} disabled={loading}>
-        {loading?"로그인 중...":"로그인"}
-      </button>
-      <div style={{textAlign:"center",marginTop:14,fontSize:12,color:"var(--text3)"}}>
-        계정이 없으신가요? 선생님께 계정 생성을 요청하세요.
+
+      {err&&<div className="err-box" style={{marginBottom:12}}>{err}</div>}
+      {msg&&<div className="info-box" style={{marginBottom:12,whiteSpace:"pre-line"}}>{msg}</div>}
+
+      {/* ── 로그인 ── */}
+      {tab==="login"&&<>
+        <div className="fg"><label>이메일</label>
+          <input type="email" placeholder="student@school.kr" value={email}
+            onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+        </div>
+        <div className="fg"><label>비밀번호</label>
+          <input type="password" placeholder="••••••••" value={pw}
+            onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()}/>
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",marginTop:8,padding:"12px"}}
+          onClick={doLogin} disabled={loading}>
+          {loading?"로그인 중...":"로그인"}
+        </button>
+        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
+          계정이 없으신가요?{" "}
+          <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
+            onClick={()=>switchTab("signup")}>회원가입</span>
+          {" · "}
+          <span style={{color:"var(--text3)",cursor:"pointer",textDecoration:"underline"}}
+            onClick={()=>switchTab("guest")}>비회원 이용</span>
+        </div>
+      </>}
+
+      {/* ── 회원가입 ── */}
+      {tab==="signup"&&<>
+        <div className="info-box" style={{fontSize:11,marginBottom:12}}>
+          🎁 신규 회원가입 시 <strong>코인 1개</strong>가 즉시 지급됩니다!
+        </div>
+        <div className="fr2">
+          <div className="fg"><label>이름 *</label>
+            <input type="text" placeholder="홍길동" value={name} onChange={e=>setName(e.target.value)}/>
+          </div>
+          <div className="fg"><label>학교명 *</label>
+            <input type="text" placeholder="○○고등학교" value={school} onChange={e=>setSchool(e.target.value)}/>
+          </div>
+        </div>
+        <div className="fg"><label>학년 *</label>
+          <div style={{display:"flex",gap:8}}>
+            {["1학년","2학년","3학년"].map(g=>(
+              <button key={g} onClick={()=>setGrade(g)}
+                className={"btn "+(grade===g?"btn-primary":"btn-ghost")}
+                style={{flex:1,fontSize:13}}>{g}</button>
+            ))}
+          </div>
+        </div>
+        <div className="fg"><label>이메일 *</label>
+          <input type="email" placeholder="student@school.kr" value={email} onChange={e=>setEmail(e.target.value)}/>
+        </div>
+        <div className="fg"><label>비밀번호 * (6자 이상)</label>
+          <input type="password" placeholder="••••••••" value={pw} onChange={e=>setPw(e.target.value)}/>
+        </div>
+        <div className="fg"><label>비밀번호 확인 *</label>
+          <input type="password" placeholder="••••••••" value={pw2} onChange={e=>setPw2(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&doSignup()}/>
+        </div>
+        <button className="btn btn-primary" style={{width:"100%",padding:"12px"}}
+          onClick={doSignup} disabled={loading}>
+          {loading?"처리 중...":"🎁 회원가입 (코인 1개 지급)"}
+        </button>
+        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
+          이미 계정이 있으신가요?{" "}
+          <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
+            onClick={()=>switchTab("login")}>로그인</span>
+        </div>
+      </>}
+
+      {/* ── 비회원 이용 ── */}
+      {tab==="guest"&&<>
+        <div style={{background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",
+          borderRadius:"var(--r)",padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
+          <div style={{fontWeight:700,color:"var(--warn)",marginBottom:4}}>📋 비회원 이용 안내</div>
+          <div>• 코인 <strong>1개</strong>가 지급되어 탐구보고서 1개를 작성할 수 있습니다.</div>
+          <div>• 작성한 보고서는 <strong>저장되지 않습니다.</strong></div>
+          <div>• 계속 이용하려면 회원가입을 추천합니다.</div>
+        </div>
+        <div className="fr2">
+          <div className="fg"><label>이름 *</label>
+            <input type="text" placeholder="홍길동" value={name} onChange={e=>setName(e.target.value)}/>
+          </div>
+          <div className="fg"><label>학교명 *</label>
+            <input type="text" placeholder="○○고등학교" value={school} onChange={e=>setSchool(e.target.value)}/>
+          </div>
+        </div>
+        <div className="fg"><label>학년 *</label>
+          <div style={{display:"flex",gap:8}}>
+            {["1학년","2학년","3학년"].map(g=>(
+              <button key={g} onClick={()=>setGrade(g)}
+                className={"btn "+(grade===g?"btn-primary":"btn-ghost")}
+                style={{flex:1,fontSize:13}}>{g}</button>
+            ))}
+          </div>
+        </div>
+        <div className="fg"><label>연락처 * (숫자만 또는 010-0000-0000)</label>
+          <input type="tel" placeholder="010-1234-5678" value={phone}
+            onChange={e=>setPhone(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doGuest()}/>
+        </div>
+        <button className="btn btn-warn" style={{width:"100%",padding:"12px",marginTop:4,
+          background:"var(--warn)",color:"#000",border:"none",borderRadius:"var(--r)",
+          fontSize:14,fontWeight:600,cursor:"pointer"}}
+          onClick={doGuest} disabled={loading}>
+          {loading?"처리 중...":"비회원으로 시작하기 (코인 1개)"}
+        </button>
+        <div style={{textAlign:"center",marginTop:10,fontSize:12,color:"var(--text3)"}}>
+          <span style={{color:"var(--accent)",cursor:"pointer",textDecoration:"underline"}}
+            onClick={()=>switchTab("signup")}>회원가입하면 코인을 더 받을 수 있습니다</span>
+        </div>
+      </>}
+
+      {/* 관리자 연락처 */}
+      <div style={{marginTop:24,paddingTop:16,borderTop:"1px solid var(--border)",
+        textAlign:"center",fontSize:11,color:"var(--text3)"}}>
+        <div>문의 · 코인 지급 요청</div>
+        <div style={{fontSize:13,fontWeight:600,color:"var(--text2)",marginTop:4,letterSpacing:"1px"}}>
+          📞 010-8107-5210
+        </div>
       </div>
     </div>
   </div>;
 }
-
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────
 function App(){
@@ -3218,6 +4289,7 @@ function App(){
     showCoin={screen==="show_coin"}
     onCoinConfirm={handleCoinConfirm}
     onCoinCancel={()=>setScreen("home")}
+    onUserUpdate={(u)=>setUser(u)}
   />;
 }
 
