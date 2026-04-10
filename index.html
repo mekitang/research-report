@@ -301,7 +301,7 @@ function makeFilename(data,suffix){
 
 // ─── Config ───────────────────────────────────────────────────────────────
 let GEMINI_KEY = "AIzaSyBBOJsaOjUOkYNJAj8_kfcRZXA2yOqiRjs";
-const MODEL   = "gemini-2.0-flash";
+const MODEL   = "gemini-2.5-flash";
 const PAGES   = ["기본정보","관심분야","주제추천","소주제구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
 // ─── Gemini helpers ───────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ function SaveModal({onClose,data,user,reportId,onReportIdSet,onLoad}){
     try{
       await waitFb();
       const {collection,query,where,getDocs}=window._fbFns;
-      const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid));
+      const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid),where("deleted","!=",true));
       const snap=await getDocs(q);
       const docs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>!d.deleted);
       docs.sort((a,b)=>{const ta=a.updatedAt?.toMillis?.()||0;const tb=b.updatedAt?.toMillis?.()||0;return tb-ta;});
@@ -3695,7 +3695,7 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
         const {collection,query,where,getDocs}=window._fbFns;
         const q=query(collection(window._fbDb,"reports"),where("userId","==",user.uid));
         const snap=await getDocs(q);
-        const docs=snap.docs.map(d=>({id:d.id,...d.data()}));
+        const docs=snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>!d.deleted);
         docs.sort((a,b)=>{
           const ta=a.updatedAt?.toMillis?.()|| new Date(a.updatedAt||0).getTime();
           const tb=b.updatedAt?.toMillis?.()|| new Date(b.updatedAt||0).getTime();
