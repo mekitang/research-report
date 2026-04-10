@@ -1,3 +1,6 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
@@ -29,9 +32,8 @@
   };
   window._fbReady=true;window.dispatchEvent(new Event("firebase-ready"));
 })();
-</script><!DOCTYPE html>
-<html lang="ko">
-<head>
+</script>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>탐구보고서 AI 작성 시스템 v2.0</title>
@@ -4213,43 +4215,44 @@ function App(){
   const [loadReportId,setLoadReportId]=useState(null);
 
   useEffect(()=>{
-    const fbTimeout=setTimeout(()=>setChecking(false), 5000);
-    waitFb().then(()=>{
-      clearTimeout(fbTimeout);
-      const {onAuthStateChanged,doc,getDoc}=window._fbFns;
-      onAuthStateChanged(window._fbAuth,async(fbUser)=>{
-        if(fbUser){
+    // 안전망: 10초 후에도 로딩 중이면 강제 해제
+    const fbTimeout=setTimeout(()=>{
+      setChecking(false);
+    }, 10000);
+
+    const init=async()=>{
+      try{
+        await waitFb();
+        clearTimeout(fbTimeout);
+        const {onAuthStateChanged,doc,getDoc}=window._fbFns;
+        onAuthStateChanged(window._fbAuth,async(fbUser)=>{
           try{
-            const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
-            if(snap.exists()){
-              setUser(prev=>{
-                // 이미 handleLogin으로 세팅된 경우 덮어쓰지 않음 (깜박임 방지)
-                if(prev&&prev.uid===fbUser.uid) return prev;
-                return {uid:fbUser.uid,...snap.data()};
-              });
-              setScreen(prev=>prev||"home");
+            if(fbUser){
+              const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
+              if(snap.exists()){
+                setUser({uid:fbUser.uid,...snap.data()});
+              }else{
+                setUser(false);
+              }
             }else{
-              console.warn("users 문서 없음:", fbUser.uid);
-              setUser(false);
+              // 로그아웃 상태 - guest는 유지
+              setUser(prev=>(prev&&prev.role==="guest")?prev:false);
             }
           }catch(e){
-            console.error("Auth state change error:", e.message);
-            setUser(prev=>prev||false);
+            console.error("onAuthStateChanged error:", e.message);
+            setUser(false);
+          }finally{
+            setChecking(false);
           }
-        }else{
-          setUser(prev=>{
-            if(prev&&prev.role==="guest") return prev; // 비회원은 유지
-            return false;
-          });
-        }
+        });
+      }catch(e){
+        console.error("Firebase init failed:", e);
+        clearTimeout(fbTimeout);
+        setUser(false);
         setChecking(false);
-      });
-    }).catch((e)=>{
-      console.error("Firebase init error:", e);
-      clearTimeout(fbTimeout);
-      setUser(false);
-      setChecking(false);
-    });
+      }
+    };
+    init();
     return ()=>clearTimeout(fbTimeout);
   },[]);
 
