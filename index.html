@@ -3917,6 +3917,7 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
   // 자동저장
   const autoSave=async(currentData,currentReportId)=>{
     if(!currentReportId) return;
+    if(user.role==="guest") return; // 비회원은 저장 안함
     try{
       await waitFb();
       const {doc,setDoc,serverTimestamp}=window._fbFns;
@@ -4241,50 +4242,35 @@ function App(){
   const [loadReportId,setLoadReportId]=useState(null);
 
   useEffect(()=>{
-    // 안전망: 10초 후에도 로딩 중이면 강제 해제
-    const fbTimeout=setTimeout(()=>{
-      setChecking(false);
-    }, 10000);
-
-    const init=async()=>{
-      try{
-        await waitFb();
-        clearTimeout(fbTimeout);
-        const {onAuthStateChanged,doc,getDoc}=window._fbFns;
-        onAuthStateChanged(window._fbAuth,async(fbUser)=>{
+    waitFb().then(()=>{
+      const {onAuthStateChanged,doc,getDoc}=window._fbFns;
+      onAuthStateChanged(window._fbAuth,async(fbUser)=>{
+        if(fbUser){
           try{
-            if(fbUser){
-              const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
-              if(snap.exists()){
-                setUser({coins:0,role:"student",name:"",school:"",grade:"",...snap.data(),uid:fbUser.uid});
-              }else{
-                setUser(false);
-              }
+            const snap=await getDoc(doc(window._fbDb,"users",fbUser.uid));
+            if(snap.exists()){
+              setUser({uid:fbUser.uid,...snap.data()});
             }else{
-              // 로그아웃 상태 - guest는 유지
-              setUser(prev=>(prev&&prev.role==="guest")?prev:false);
+              setUser(false);
             }
           }catch(e){
-            console.error("onAuthStateChanged error:", e.message);
+            console.error("onAuthStateChanged error:",e.message);
             setUser(false);
-          }finally{
-            setChecking(false);
           }
-        });
-      }catch(e){
-        console.error("Firebase init failed:", e);
-        clearTimeout(fbTimeout);
-        setUser(false);
+        }else{
+          setUser(false);
+        }
         setChecking(false);
-      }
-    };
-    init();
-    return ()=>clearTimeout(fbTimeout);
+      });
+    }).catch((e)=>{
+      console.error("Firebase init error:",e);
+      setUser(false);
+      setChecking(false);
+    });
   },[]);
 
   const handleLogin=(userData)=>{
     setChecking(false);
-    // 기본값 보장
     setUser({coins:0,role:"student",name:"",school:"",grade:"",...userData});
     setScreen("home");
   };
@@ -4303,14 +4289,16 @@ function App(){
 
   const handleCoinConfirm=async()=>{
     try{
-      await waitFb();
-      const {doc,updateDoc,increment}=window._fbFns;
-      await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
       const id=user.uid+"_"+Date.now();
       setUser(p=>({...p,coins:(p.coins||1)-1}));
       setNewReportId(id);
       setLoadData(null);setLoadReportId(null);
       setScreen("writing");
+      if(user.role!=="guest"){
+        await waitFb();
+        const {doc,updateDoc,increment}=window._fbFns;
+        await updateDoc(doc(window._fbDb,"users",user.uid),{coins:increment(-1)});
+      }
     }catch(e){alert("코인 차감 오류: "+e.message);}
   };
 
@@ -4329,20 +4317,16 @@ function App(){
   if(!user) return <LoginScreen onLogin={handleLogin}/>;
   if(user.role==="admin") return <AdminScreen user={user} onLogout={handleLogout}/>;
 
-  // 비회원 — 홈화면 없이 환영 페이지
+  // 비회원 환영 화면
   if(user.role==="guest"&&screen==="home"){
-    return <div className="login-wrap" style={{alignItems:"flex-start",paddingTop:40}}>
+    return <div className="login-wrap" style={{position:"relative",zIndex:9998,alignItems:"flex-start",paddingTop:40}}>
       <div style={{width:"100%",maxWidth:560,margin:"0 auto"}}>
-        <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",
-          padding:"32px",textAlign:"center"}}>
+        <div style={{background:"var(--surface)",border:"1px solid var(--accent)",borderRadius:"var(--r2)",padding:"32px",textAlign:"center"}}>
           <div style={{fontSize:32,marginBottom:8}}>👋</div>
           <div style={{fontSize:18,fontWeight:700,marginBottom:4}}>{user.name}님, 환영합니다!</div>
-          <div style={{fontSize:13,color:"var(--text3)",marginBottom:20}}>
-            {user.school} {user.grade} · 비회원 이용
-          </div>
+          <div style={{fontSize:13,color:"var(--text3)",marginBottom:20}}>{user.school} {user.grade} · 비회원 이용</div>
           <div style={{background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",
-            borderRadius:"var(--r)",padding:"12px 16px",marginBottom:20,fontSize:12,
-            color:"var(--warn)",lineHeight:1.8,textAlign:"left"}}>
+            borderRadius:"var(--r)",padding:"12px 16px",marginBottom:20,fontSize:12,color:"var(--warn)",lineHeight:1.8,textAlign:"left"}}>
             <div style={{fontWeight:700,marginBottom:4}}>📋 비회원 이용 안내</div>
             <div>🪙 코인 <strong>1개</strong>가 지급되었습니다.</div>
             <div>✍️ 탐구보고서 <strong>1개</strong>를 작성할 수 있습니다.</div>
@@ -4352,9 +4336,7 @@ function App(){
             onClick={handleCoinConfirm} disabled={(user.coins||0)<=0}>
             {(user.coins||0)<=0?"코인 없음":"✍️ 탐구보고서 작성 시작 (코인 1개 사용)"}
           </button>
-          <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleLogout}>
-            로그아웃
-          </button>
+          <button className="btn btn-ghost" style={{width:"100%"}} onClick={handleLogout}>로그아웃</button>
         </div>
       </div>
     </div>;
@@ -4386,14 +4368,7 @@ function App(){
   />;
 }
 
-const _root = ReactDOM.createRoot(document.getElementById("root"));
-_root.render(<App/>);
-// React 렌더링 후 로딩 화면 숨기기
-setTimeout(()=>{
-  var fb = document.getElementById('loading-fallback');
-  if(fb) fb.style.display = 'none';
-}, 100);
-
+ReactDOM.createRoot(document.getElementById("root"));
 setTimeout(function(){
   var fb = document.getElementById('loading-fallback');
   if(fb) fb.style.display = 'none';
