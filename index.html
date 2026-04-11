@@ -792,27 +792,70 @@ function Page3({data,set,onPrev,onNext}){
       const topic=data.selectedTopic||data.field||"";
       // geminiJSON으로 실제 URL 직접 반환받기
       const r=await geminiJSON(
-        `고등학생 탐구보고서 참고자료를 찾아주세요.
-탐구주제: ${topic}
+        `고등학생 탐구보고서 소주제에 대한 참고자료 URL 3개를 알려주세요.
+` +
+        `탐구주제: ${topic}
 소주제: ${q[i].text}
 
 ` +
-        `조건:
-- 실제로 접근 가능한 URL만 포함
-- 한국어 자료 우선 (논문, 뉴스, 공공기관, 위키피디아 등)
+        `[중요 규칙 - 반드시 준수]
 ` +
-        `- vertexaisearch나 리다이렉트 URL 절대 사용 금지
-- 실제 도메인 URL만 사용 (예: https://ko.wikipedia.org/...)
+        `1. 실제로 존재하는 URL만 포함. 추측하거나 만들어낸 URL 절대 금지.
+` +
+        `2. 다음 신뢰할 수 있는 공신력 있는 사이트의 URL만 사용:
+` +
+        `   - 학술논문: RISS(riss.kr), DBpia(dbpia.co.kr), KISS(kiss.kstudy.com), PubMed(pubmed.ncbi.nlm.nih.gov)
+` +
+        `   - 공공기관: 국가통계포털(kosis.kr), 교육부(moe.go.kr), 한국과학기술정보연구원(kisti.re.kr)
+` +
+        `   - 언론: KBS(kbs.co.kr), YTN(ytn.co.kr), 조선(chosun.com), 중앙(joongang.co.kr), 한겨레(hani.co.kr)
+` +
+        `   - 대학/연구기관: ac.kr 도메인, re.kr 도메인
+` +
+        `3. 위키피디아, 나무위키 등 위키 계열 사이트 URL 절대 사용 금지.
+` +
+        `4. URL 끝에 임의 숫자나 문자 추가 금지. 정확한 URL만 사용.
+` +
+        `5. 리다이렉트/단축 URL 금지.
 
 ` +
-        `JSON형식: {"sources":[{"url":"실제URL","title":"자료제목"},{"url":"실제URL","title":"자료제목"},{"url":"실제URL","title":"자료제목"}]}`
+        `JSON형식(URL 3개): {"sources":[{"url":"URL","title":"자료제목"}]}`
       );
+      // 신뢰할 수 있는 도메인 필터
+      const TRUSTED_DOMAINS=[
+        "kosis.kr","kostat.go.kr","moe.go.kr","kisti.re.kr",
+        "pubmed.ncbi.nlm.nih.gov","ncbi.nlm.nih.gov",
+        "academic.naver.com","dbpia.co.kr","riss.kr","kiss.kstudy.com",
+        "sciencedirect.com","nature.com","springer.com","elsevier.com",
+        "kbs.co.kr","ytn.co.kr","news.naver.com","chosun.com",
+        "hani.co.kr","donga.com","joongang.co.kr","mk.co.kr",
+        "korea.kr","gov.kr","ac.kr","or.kr","re.kr"
+      ];
+      // 위키류 차단 목록
+      const BLOCKED_DOMAINS=["wikipedia.org","namu.wiki","wiki","fandom.com"];
+      const isBlocked=(url)=>{
+        try{
+          const host=new URL(url).hostname;
+          return BLOCKED_DOMAINS.some(d=>host===d||host.endsWith("."+d)||host.includes("wiki"));
+        }catch{return false;}
+      };
+      const isTrusted=(url)=>{
+        try{
+          const host=new URL(url).hostname;
+          return TRUSTED_DOMAINS.some(d=>host===d||host.endsWith("."+d));
+        }catch{return false;}
+      };
       const sources=(r?.sources||[])
-        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch"))
+        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch")&&!isBlocked(s.url)&&isTrusted(s.url))
         .slice(0,5);
+      // 신뢰 도메인 아니어도 wikipedia/namu는 허용
+      const fallbackSources=(sources.length===0)?(r?.sources||[])
+        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch")&&!isBlocked(s.url))
+        .slice(0,3):[];
+      const finalFiltered=[...sources,...fallbackSources].slice(0,5);
       const newQ2=[...(data.questions||[])];
-      if(sources.length>0){
-        newQ2[i]={...newQ2[i],links:sources,link:sources[0]?.url||"",linksLoading:false};
+      if(finalFiltered.length>0){
+        newQ2[i]={...newQ2[i],links:finalFiltered,link:finalFiltered[0]?.url||"",linksLoading:false};
       } else {
         newQ2[i]={...newQ2[i],linksLoading:false};
       }
