@@ -749,6 +749,65 @@ function Page3({data,set,onPrev,onNext}){
   };
 
 
+  // 소주제 채운 개수
+  const filledCount=(data.questions||[]).slice(0,count).filter(q=>q.text.trim()).length;
+
+  // AI 추천 소주제 선택
+  const selectSuggestion=(s)=>{
+    const q=[...(data.questions||[])];
+    const empty=q.findIndex((x,i)=>i<count&&!x.text.trim());
+    if(empty>=0){ q[empty]={...q[empty],text:s.text,reason:s.reason}; }
+    else { q[count-1]={...q[count-1],text:s.text,reason:s.reason}; }
+    set(p=>({...p,questions:q}));
+  };
+
+  // 개별 소주제 참고자료 검색
+  const searchRefsForQ=async(i)=>{
+    const q=[...(data.questions||[])];
+    if(!q[i]?.text.trim()) return;
+    q[i]={...q[i],linksLoading:true};
+    set(p=>({...p,questions:q}));
+    try{
+      const topic=data.selectedTopic||data.field||"";
+      const r=await geminiSearch(
+        `탐구 소주제 참고자료 3개 추천.
+주제: ${topic}
+소주제: ${q[i].text}
+` +
+        `조건: 실제 접근 가능한 학술/뉴스/공공 자료, 한국어 우선
+` +
+        `JSON:{"sources":[{"url":"링크","title":"제목"}]}`
+      );
+      const sources=(r?.sources||[]).slice(0,5);
+      if(sources.length>0){
+        const newQ=[...(data.questions||[])];
+        newQ[i]={...newQ[i],links:sources,link:sources[0]?.url||"",linksLoading:false};
+        set(p=>({...p,questions:newQ}));
+      } else {
+        const newQ=[...(data.questions||[])];
+        newQ[i]={...newQ[i],linksLoading:false};
+        set(p=>({...p,questions:newQ}));
+      }
+    }catch(e){
+      const newQ=[...(data.questions||[])];
+      newQ[i]={...newQ[i],linksLoading:false};
+      set(p=>({...p,questions:newQ}));
+      alert("자료 검색 실패: "+e.message);
+    }
+  };
+
+  // 전체 소주제 참고자료 일괄 검색
+  const searchAllRefs=async()=>{
+    setRefLoading(true);
+    const filled=(data.questions||[]).slice(0,count).filter(q=>q.text.trim());
+    for(let i=0;i<filled.length;i++){
+      const idx=(data.questions||[]).findIndex(q=>q.text===filled[i].text);
+      if(idx>=0) await searchRefsForQ(idx);
+      await new Promise(r=>setTimeout(r,2000));
+    }
+    setRefLoading(false);
+  };
+
   return <div className="fade">
     <PH page={4} title="본론 소주제 정하기" sub="탐구보고서 본론에서 다룰 소주제를 정하세요."/>
 
