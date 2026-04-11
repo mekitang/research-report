@@ -290,10 +290,9 @@ function cleanMarkdown(text){
 
 // ─── 파일명 생성 ────────────────────────────────────────────────────────
 function makeFilename(data,suffix){
-  var topic=(data.selectedTopic||"탐구보고서").slice(0,20).replace(/[/:*?"<>|]/g,"");
-  var grade=(data.grade||"").replace("학년","").trim();
+  var topic=(data.selectedTopic||"탐구보고서").slice(0,30).replace(/[/:*?"<>|\\]/g,"").trim();
   var name=(data.name||"").trim();
-  var base=[topic,grade?grade+"학년":"",name].filter(Boolean).join("_");
+  var base=[topic,name].filter(Boolean).join("_");
   return suffix?(base+"_"+suffix):base;
 }
 
