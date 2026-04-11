@@ -691,8 +691,29 @@ function Page3({data,set,onPrev,onNext}){
       const d=await res.json();
       const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
       const chunks=d.candidates?.[0]?.groundingMetadata?.groundingChunks||[];
-      const sources=chunks.filter(c=>c.web?.uri).map(c=>({url:c.web.uri,title:c.web.title||c.web.uri}));
-      return {text, sources};
+      // vertexaisearch 리다이렉트 URL 대신 실제 URL 추출
+      const sources=chunks.filter(c=>c.web?.uri).map(c=>{
+        let url=c.web.uri;
+        // vertexaisearch 리다이렉트 URL이면 텍스트에서 실제 URL 찾기
+        if(url.includes("vertexaisearch.cloud.google.com")){
+          // uri 파라미터나 title에서 실제 도메인 추출 시도
+          url=""; // 리다이렉트 URL 버림
+        }
+        return {url, title:c.web.title||""};
+      }).filter(s=>s.url); // 빈 URL 제거
+      
+      // 텍스트에서 URL 직접 추출 (백업)
+      const urlRegex=/https?:\/\/(?!vertexaisearch)[^\s\)"'<>]+/g;
+      const textUrls=(text.match(urlRegex)||[])
+        .filter(u=>!u.includes("vertexaisearch"))
+        .map(u=>u.replace(/[.,;:!?]+$/,"")) // 후행 구두점 제거
+        .slice(0,5);
+      
+      // sources가 없으면 텍스트에서 추출한 URL 사용
+      const finalSources=sources.length>0 ? sources :
+        textUrls.map(u=>({url:u,title:u.split("/").filter(Boolean).pop()||u}));
+      
+      return {text, sources:finalSources};
     }, 3, "geminiSearch");
   };
 
@@ -761,37 +782,46 @@ function Page3({data,set,onPrev,onNext}){
     set(p=>({...p,questions:q}));
   };
 
-  // 개별 소주제 참고자료 검색
+  // 개별 소주제 참고자료 검색 (실제 URL 반환)
   const searchRefsForQ=async(i)=>{
     const q=[...(data.questions||[])];
     if(!q[i]?.text.trim()) return;
-    q[i]={...q[i],linksLoading:true};
-    set(p=>({...p,questions:q}));
+    const newQ1=[...(data.questions||[])];
+    newQ1[i]={...newQ1[i],linksLoading:true};
+    set(p=>({...p,questions:newQ1}));
     try{
       const topic=data.selectedTopic||data.field||"";
-      const r=await geminiSearch(
-        `탐구 소주제 참고자료 3개 추천.
-주제: ${topic}
+      // geminiJSON으로 실제 URL 직접 반환받기
+      const r=await geminiJSON(
+        `고등학생 탐구보고서 참고자료를 찾아주세요.
+탐구주제: ${topic}
 소주제: ${q[i].text}
+
 ` +
-        `조건: 실제 접근 가능한 학술/뉴스/공공 자료, 한국어 우선
+        `조건:
+- 실제로 접근 가능한 URL만 포함
+- 한국어 자료 우선 (논문, 뉴스, 공공기관, 위키피디아 등)
 ` +
-        `JSON:{"sources":[{"url":"링크","title":"제목"}]}`
+        `- vertexaisearch나 리다이렉트 URL 절대 사용 금지
+- 실제 도메인 URL만 사용 (예: https://ko.wikipedia.org/...)
+
+` +
+        `JSON형식: {"sources":[{"url":"실제URL","title":"자료제목"},{"url":"실제URL","title":"자료제목"},{"url":"실제URL","title":"자료제목"}]}`
       );
-      const sources=(r?.sources||[]).slice(0,5);
+      const sources=(r?.sources||[])
+        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch"))
+        .slice(0,5);
+      const newQ2=[...(data.questions||[])];
       if(sources.length>0){
-        const newQ=[...(data.questions||[])];
-        newQ[i]={...newQ[i],links:sources,link:sources[0]?.url||"",linksLoading:false};
-        set(p=>({...p,questions:newQ}));
+        newQ2[i]={...newQ2[i],links:sources,link:sources[0]?.url||"",linksLoading:false};
       } else {
-        const newQ=[...(data.questions||[])];
-        newQ[i]={...newQ[i],linksLoading:false};
-        set(p=>({...p,questions:newQ}));
+        newQ2[i]={...newQ2[i],linksLoading:false};
       }
+      set(p=>({...p,questions:newQ2}));
     }catch(e){
-      const newQ=[...(data.questions||[])];
-      newQ[i]={...newQ[i],linksLoading:false};
-      set(p=>({...p,questions:newQ}));
+      const newQ3=[...(data.questions||[])];
+      newQ3[i]={...newQ3[i],linksLoading:false};
+      set(p=>({...p,questions:newQ3}));
       alert("자료 검색 실패: "+e.message);
     }
   };
