@@ -2095,7 +2095,7 @@ ${text}`
 
 
 // ─── Page 12 ─────────────────────────────────────────────────────────────
-function Page12({data,set,onPrev}){
+function Page12({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
   const ev=data.selfEval||{};
   const cr=data.correctedEval||{};
@@ -2177,7 +2177,7 @@ JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내
     </div>
     <div className="nav-row">
       <button className="btn btn-secondary" onClick={onPrev}>← 이전</button>
-      <button className="btn btn-success" onClick={()=>alert("🎉 탐구보고서 작성이 완료되었습니다!\n10페이지에서 최종 PDF를 다운로드하세요.")}>✅ 완료</button>
+      <button className="btn btn-primary" onClick={onNext}>말투 변환 & 최종 출력 →</button>
     </div>
   </div>;
 }
