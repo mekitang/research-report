@@ -1407,49 +1407,41 @@ function Page9({data,set,onPrev,onNext}){
   const genAll=async()=>{
     setLoading(true); setWhich("all");
     try{
-      const bodyText=data.questions.map((q,i)=>`[${q.text}]\n${data.body?.[`q${i}`]||""}`).join("\n\n");
-      // 3페이지 질문에서 수집된 모든 링크 (links 배열 + link 단일)
-      const links=[];
-      (data.questions||[]).forEach(q=>{
-        if(q.links&&q.links.length>0){ q.links.forEach(lk=>{ if(lk.url?.trim()) links.push(lk.url); }); }
-        else if(q.link?.trim()) links.push(q.link);
-      });
-      const r=await geminiJSON(`
-고등학생 탐구보고서 결론 작성.
-주제: ${data.selectedTopic} / 학년: ${data.grade}
-서론 동기: ${data.intro?.motivation||""}
-본론 요약: ${bodyText.slice(0,800)}
-참고 링크들: ${links.join(", ")}
+      const qs=(data.questions||[]);
+      const bodyText=qs.map((q,i)=>{
+        const body=(data.body&&data.body["q"+i])||"";
+        return "["+q.text+"]\n"+body;
+      }).join("\n\n");
 
-작성 기준:
-- 탐구 요약: 500~700자 (전체 탐구 내용 종합 정리)
-- 알게 된 점: 300~500자 (새롭게 알게 된 사실과 인사이트)
-- 향상된 역량: 200~300자 (탐구를 통해 키운 역량)
-- 추가 탐구 목표: 200자 내외 (향후 더 탐구하고 싶은 방향)
+      const prompt=
+        "고등학생 탐구보고서 결론 작성.\n"+
+        "주제: "+(data.selectedTopic||"")+" / 학년: "+(data.grade||"")+"\n"+
+        "서론 동기: "+(data.intro?.motivation||"").slice(0,200)+"\n"+
+        "본론 요약: "+bodyText.slice(0,800)+"\n\n"+
+        "작성 기준:\n"+
+        "- 탐구 요약: 500~700자 (전체 탐구 내용 종합 정리)\n"+
+        "- 알게 된 점: 300~500자 (새롭게 알게 된 사실과 인사이트)\n"+
+        "- 향상된 역량: 200~300자 (탐구를 통해 키운 역량)\n"+
+        "- 추가 탐구 목표: 200자 내외 (향후 더 탐구하고 싶은 방향)\n\n"+
+        'JSON:{"summary":"탐구요약","learned":"알게된점","skills":"향상된역량","future":"추가탐구목표","refs":[],"books":[]}';
 
-또한 아래도 포함:
-- 참고문헌: 제공된 링크를 아래 형식으로 작성. DBpia 논문 우선, 국내 언론기사 추가. 위키/해외자료 제외.
-  형식: 저자명. (연도). 제목. 매체명. URL
-  예시: 홍길동. (2024). 인공지능과 교육의 미래. 조선일보. https://www.chosun.com/...
-  - 저자가 없으면 매체명으로 대체
-  - 연도를 모르면 (n.d.) 사용
-  - 제목은 원래 기사/논문 제목 그대로
-- 참고도서: 탐구 주제 관련 가장 유명한 국내 도서 1권만. 형식: 저자명. (연도). 도서명. 출판사.
-
-JSON:
-{
-  "summary":"내용",
-  "learned":"내용",
-  "skills":"내용",
-  "future":"내용",
-  "refs":[],
-  "books":[]
-}`);
-      if(r) set(p=>({...p,conclusion:{...p.conclusion,...r}}));
-    }catch(e){}
+      const r=await geminiJSON(prompt);
+      if(r){
+        set(p=>({...p,conclusion:{...p.conclusion,
+          summary:r.summary||p.conclusion?.summary||"",
+          learned:r.learned||p.conclusion?.learned||"",
+          skills:r.skills||p.conclusion?.skills||"",
+          future:r.future||p.conclusion?.future||"",
+        }}));
+      } else {
+        alert("결론 생성에 실패했습니다. 다시 시도해주세요.");
+      }
+    }catch(e){
+      console.error("결론 생성 오류:", e);
+      alert("오류: "+e.message);
+    }
     setLoading(false); setWhich(null);
   };
-
   const sections=[
     {key:"summary",label:"탐구 요약",min:500,max:700,ph:"탐구의 핵심 내용을 요약하세요. (500~700자)"},
     {key:"learned",label:"알게 된 점",min:300,max:500,ph:"탐구를 통해 새롭게 알게 된 점을 서술하세요. (300~500자)"},
