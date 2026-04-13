@@ -646,7 +646,6 @@ function Page2({data,set,onPrev,onNext}){
 
 function Page3({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
-  const [refLoading,setRefLoading]=useState(false);
   const [err,setErr]=useState("");
   const [count,setCount]=useState(data.subTopicCount||3);
   const [suggestions,setSuggestions]=useState(data.suggestedSubTopics||[]);
@@ -671,50 +670,6 @@ function Page3({data,set,onPrev,onNext}){
     set(p=>({...p,questions:newQ,subTopicCount:n}));
   };
 
-  // Google Search grounding
-  const geminiSearch=async(prompt)=>{
-    if(!GEMINI_KEY){ const ok=await loadGeminiKey(); if(!ok) throw new Error("AI 키 없음"); }
-    return withRetry(async()=>{
-      const res=await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-        { method:"POST",
-          headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
-          body:JSON.stringify({
-            contents:[{parts:[{text:prompt}],role:"user"}],
-            tools:[{googleSearch:{}}],
-            generationConfig:{temperature:0.3,maxOutputTokens:8192}
-          })
-        }
-      );
-      if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
-      const d=await res.json();
-      const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
-      const chunks=d.candidates?.[0]?.groundingMetadata?.groundingChunks||[];
-      // vertexaisearch 리다이렉트 URL 대신 실제 URL 추출
-      const sources=chunks.filter(c=>c.web?.uri).map(c=>{
-        let url=c.web.uri;
-        // vertexaisearch 리다이렉트 URL이면 텍스트에서 실제 URL 찾기
-        if(url.includes("vertexaisearch.cloud.google.com")){
-          // uri 파라미터나 title에서 실제 도메인 추출 시도
-          url=""; // 리다이렉트 URL 버림
-        }
-        return {url, title:c.web.title||""};
-      }).filter(s=>s.url); // 빈 URL 제거
-      
-      // 텍스트에서 URL 직접 추출 (백업)
-      const urlRegex=/https?:\/\/(?!vertexaisearch)[^\s\)"'<>]+/g;
-      const textUrls=(text.match(urlRegex)||[])
-        .filter(u=>!u.includes("vertexaisearch"))
-        .map(u=>u.replace(/[.,;:!?]+$/,"")) // 후행 구두점 제거
-        .slice(0,5);
-      
-      // sources가 없으면 텍스트에서 추출한 URL 사용
-      const finalSources=sources.length>0 ? sources :
-        textUrls.map(u=>({url:u,title:u.split("/").filter(Boolean).pop()||u}));
-      
-      return {text, sources:finalSources};
-    }, 3, "geminiSearch");
-  };
 
   // AI 소주제 추천
   const aiSuggest=async()=>{
@@ -781,104 +736,7 @@ function Page3({data,set,onPrev,onNext}){
     set(p=>({...p,questions:q}));
   };
 
-  // 개별 소주제 참고자료 검색 (실제 URL 반환)
-  const searchRefsForQ=async(i)=>{
-    const q=[...(data.questions||[])];
-    if(!q[i]?.text.trim()) return;
-    const newQ1=[...(data.questions||[])];
-    newQ1[i]={...newQ1[i],linksLoading:true};
-    set(p=>({...p,questions:newQ1}));
-    try{
-      const topic=data.selectedTopic||data.field||"";
-      // geminiJSON으로 실제 URL 직접 반환받기
-      const r=await geminiJSON(
-        `고등학생 탐구보고서 소주제에 대한 참고자료 URL 3개를 알려주세요.
-` +
-        `탐구주제: ${topic}
-소주제: ${q[i].text}
 
-` +
-        `[중요 규칙 - 반드시 준수]
-` +
-        `1. 실제로 존재하는 URL만 포함. 추측하거나 만들어낸 URL 절대 금지.
-` +
-        `2. 다음 신뢰할 수 있는 공신력 있는 사이트의 URL만 사용:
-` +
-        `   - 학술논문: RISS(riss.kr), DBpia(dbpia.co.kr), KISS(kiss.kstudy.com), PubMed(pubmed.ncbi.nlm.nih.gov)
-` +
-        `   - 공공기관: 국가통계포털(kosis.kr), 교육부(moe.go.kr), 한국과학기술정보연구원(kisti.re.kr)
-` +
-        `   - 언론: KBS(kbs.co.kr), YTN(ytn.co.kr), 조선(chosun.com), 중앙(joongang.co.kr), 한겨레(hani.co.kr)
-` +
-        `   - 대학/연구기관: ac.kr 도메인, re.kr 도메인
-` +
-        `3. 위키피디아, 나무위키 등 위키 계열 사이트 URL 절대 사용 금지.
-` +
-        `4. URL 끝에 임의 숫자나 문자 추가 금지. 정확한 URL만 사용.
-` +
-        `5. 리다이렉트/단축 URL 금지.
-
-` +
-        `JSON형식(URL 3개): {"sources":[{"url":"URL","title":"자료제목"}]}`
-      );
-      // 신뢰할 수 있는 도메인 필터
-      const TRUSTED_DOMAINS=[
-        "kosis.kr","kostat.go.kr","moe.go.kr","kisti.re.kr",
-        "pubmed.ncbi.nlm.nih.gov","ncbi.nlm.nih.gov",
-        "academic.naver.com","dbpia.co.kr","riss.kr","kiss.kstudy.com",
-        "sciencedirect.com","nature.com","springer.com","elsevier.com",
-        "kbs.co.kr","ytn.co.kr","news.naver.com","chosun.com",
-        "hani.co.kr","donga.com","joongang.co.kr","mk.co.kr",
-        "korea.kr","gov.kr","ac.kr","or.kr","re.kr"
-      ];
-      // 위키류 차단 목록
-      const BLOCKED_DOMAINS=["wikipedia.org","namu.wiki","wiki","fandom.com"];
-      const isBlocked=(url)=>{
-        try{
-          const host=new URL(url).hostname;
-          return BLOCKED_DOMAINS.some(d=>host===d||host.endsWith("."+d)||host.includes("wiki"));
-        }catch{return false;}
-      };
-      const isTrusted=(url)=>{
-        try{
-          const host=new URL(url).hostname;
-          return TRUSTED_DOMAINS.some(d=>host===d||host.endsWith("."+d));
-        }catch{return false;}
-      };
-      const sources=(r?.sources||[])
-        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch")&&!isBlocked(s.url)&&isTrusted(s.url))
-        .slice(0,5);
-      // 신뢰 도메인 아니어도 wikipedia/namu는 허용
-      const fallbackSources=(sources.length===0)?(r?.sources||[])
-        .filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("vertexaisearch")&&!isBlocked(s.url))
-        .slice(0,3):[];
-      const finalFiltered=[...sources,...fallbackSources].slice(0,5);
-      const newQ2=[...(data.questions||[])];
-      if(finalFiltered.length>0){
-        newQ2[i]={...newQ2[i],links:finalFiltered,link:finalFiltered[0]?.url||"",linksLoading:false};
-      } else {
-        newQ2[i]={...newQ2[i],linksLoading:false};
-      }
-      set(p=>({...p,questions:newQ2}));
-    }catch(e){
-      const newQ3=[...(data.questions||[])];
-      newQ3[i]={...newQ3[i],linksLoading:false};
-      set(p=>({...p,questions:newQ3}));
-      alert("자료 검색 실패: "+e.message);
-    }
-  };
-
-  // 전체 소주제 참고자료 일괄 검색
-  const searchAllRefs=async()=>{
-    setRefLoading(true);
-    const filled=(data.questions||[]).slice(0,count).filter(q=>q.text.trim());
-    for(let i=0;i<filled.length;i++){
-      const idx=(data.questions||[]).findIndex(q=>q.text===filled[i].text);
-      if(idx>=0) await searchRefsForQ(idx);
-      await new Promise(r=>setTimeout(r,2000));
-    }
-    setRefLoading(false);
-  };
 
   return <div className="fade">
     <PH page={4} title="본론 소주제 정하기" sub="탐구보고서 본론에서 다룰 소주제를 정하세요."/>
@@ -903,14 +761,11 @@ function Page3({data,set,onPrev,onNext}){
     {/* AI 소주제 추천 */}
     <div className="btn-row" style={{marginBottom:16}}>
       <button className="btn btn-primary" onClick={aiSuggest} disabled={loading}>
-        {loading?"추천 중...":"🤖 AI로 소주제 추천받기"}
+        {loading?"추천 중...":"🤖 AI 소주제 추천"}
       </button>
-      {filledCount>0&&<button className="btn btn-secondary" onClick={searchAllRefs} disabled={refLoading}>
-        {refLoading?"자료 검색 중...":"🔍 전체 참고자료 검색"}
-      </button>}
+
     </div>
     {loading&&<AILoad msg="소주제를 분석하고 추천 중..."/>}
-    {refLoading&&<AILoad msg="각 소주제별 참고자료를 검색 중... (약 30~40초 소요)"/>}
     {err&&<div style={{color:"var(--danger)",fontSize:13,marginBottom:10}}>{err}</div>}
 
     {/* AI 추천 목록 */}
@@ -958,13 +813,7 @@ function Page3({data,set,onPrev,onNext}){
         <div className="fg">
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
             <label>참고 자료 링크 (최대 5개)</label>
-            <div style={{display:"flex",gap:5}}>
-              <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px",color:"var(--accent)",borderColor:"var(--accent)"}}
-                onClick={()=>searchRefsForQ(i)} disabled={!q.text.trim()||q.linksLoading}>
-                {q.linksLoading?"검색 중...":"🔍 AI 자료검색"}
-              </button>
-              <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>addLink(i)}>+ 직접 추가</button>
-            </div>
+            <button className="btn btn-ghost" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>addLink(i)}>+ 링크 추가</button>
           </div>
           {(q.links&&q.links.length>0) ? (
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -987,7 +836,7 @@ function Page3({data,set,onPrev,onNext}){
               ))}
             </div>
           ) : (
-            <input type="text" placeholder="https://... (직접 입력하거나 AI 자료검색 버튼 사용)" value={q.link||""} onChange={e=>updQ(i,"link",e.target.value)}/>
+            <input type="text" placeholder="https://... (직접 입력)" value={q.link||""} onChange={e=>updQ(i,"link",e.target.value)}/>
           )}
         </div>
         {/* 참고문헌 직접 입력 */}
@@ -1641,11 +1490,9 @@ JSON:
       });
       const hasAny=apaRefs.length>0||qLinks.length>0||manualRefs.length>0;
       if(!hasAny) return <div style={{color:"var(--text3)",fontSize:12,marginBottom:12,lineHeight:1.8}}>
-        <div>소주제에서 수집한 링크가 없습니다.</div>
-        <div>위의 <strong style={{color:"var(--accent)"}}>🔍 보고서 분석하여 참고문헌 자동 생성</strong> 버튼을 눌러주세요.</div>
+        <div>아직 참고문헌이 없습니다.</div>
+        <div>소주제에서 링크를 추가하거나, 아래에서 직접 입력해주세요.</div>
       </div>;
-      // 안내: URL 없는 항목 존재 여부
-      const noUrlCount=apaRefs.filter(r=>!r.match(/https?:\/\//)).length;
       const seen=new Set();
       let idx=0;
       return <ul className="ref-list">
