@@ -640,6 +640,40 @@ function Page2({data,set,onPrev,onNext}){
       </div>
     </div>
 
+    <div className="divider"/>
+    <div className="sec-label">말투 스타일 선택 (선택사항)</div>
+    <div className="info-box" style={{marginBottom:10}}>
+      ✏️ 보고서 작성 전에 원하는 말투 스타일을 미리 선택할 수 있습니다. 나중에 '말투 변환' 단계에서도 변경 가능합니다.
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:8}}>
+      {[
+        {key:"natural",  label:"자연스러운 학생 글체",  desc:"AI가 쓴 것 같지 않은 자연스러운 고등학생 문체"},
+        {key:"formal",   label:"고1 수준",               desc:"고등학교 1학년 수준의 어휘와 문장"},
+        {key:"middle",   label:"중학생 수준",             desc:"중학생이 이해할 수 있는 쉬운 단어와 문장"},
+        {key:"simple",   label:"어려운 단어 최소화",      desc:"전문용어를 줄이고 쉽게 풀어서 표현"},
+        {key:"informal", label:"반말체",                  desc:"친근한 반말 형식으로 작성 (발표용)"},
+        {key:"academic", label:"논문체",                  desc:"격식 있는 학술 논문 스타일의 문어체"},
+      ].map(s=>(
+        <div key={s.key} onClick={()=>set(p=>({...p,preferredStyle:data.preferredStyle===s.key?"":s.key}))}
+          style={{background:"var(--surface)",border:`2px solid ${data.preferredStyle===s.key?"var(--accent)":"var(--border)"}`,
+            borderRadius:"var(--r2)",padding:"12px 14px",cursor:"pointer",transition:"all .18s",
+            boxShadow:data.preferredStyle===s.key?"0 0 8px var(--accent-glow)":"none"}}>
+          <div style={{fontSize:13,fontWeight:600,color:data.preferredStyle===s.key?"var(--accent)":"var(--text)",marginBottom:3}}>{s.label}</div>
+          <div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{s.desc}</div>
+        </div>
+      ))}
+    </div>
+    {data.preferredStyle&&(
+      <div style={{fontSize:11,color:"var(--success)",marginBottom:8}}>
+        ✓ 선택됨: {[
+          {key:"natural",label:"자연스러운 학생 글체"},{key:"formal",label:"고1 수준"},
+          {key:"middle",label:"중학생 수준"},{key:"simple",label:"어려운 단어 최소화"},
+          {key:"informal",label:"반말체"},{key:"academic",label:"논문체"},
+        ].find(s=>s.key===data.preferredStyle)?.label}
+        <span style={{color:"var(--text3)",marginLeft:8}}>— 말투 변환 단계에서 자동 선택됩니다.</span>
+      </div>
+    )}
+
     <NavRow page={1} onPrev={onPrev} onNext={onNext} nextDisabled={!data.field||!data.interest}/>
   </div>;
 }
@@ -1722,16 +1756,19 @@ ${(data.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-t
     const ev=data.selfEval||{};
     const cr=data.correctedEval||{};
     const evalFields=[{key:"motivation",label:"동기"},{key:"process",label:"과정"},{key:"skills",label:"강화된 역량"},{key:"learned",label:"새롭게 알게 된 점"},{key:"future",label:"추후 탐구"}];
+    const items=evalFields.map(f=>{
+      const val=cr[f.key]||ev[f.key]||"";
+      return val?`<table width="100%" style="border-collapse:collapse;margin:8px 0;page-break-inside:avoid">
+<tr><td style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px;border-radius:4px">
+<p style="font-size:14px;font-weight:bold;margin:0 0 6px;color:#1d4ed8">${f.label}</p>
+<p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111;font-size:14px">${esc(val)}</p>
+</td></tr></table>`:"";
+    }).filter(Boolean).join("\n");
     return `<div style="page-break-before:always;padding-top:20px">
 <h1 style="text-align:center;font-size:22px;margin-bottom:4px">자기평가서</h1>
 <p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
-<p style="text-align:center;color:#555;font-size:13px;margin-bottom:36px">탐구주제: ${esc(data.selectedTopic)}</p>
-${evalFields.map(f=>{
-  const val=cr[f.key]||ev[f.key]||"";
-  return val?`<div style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:14px 18px;margin:10px 0;border-radius:4px">
-<h3 style="font-size:14px;margin:0 0 8px;color:#1d4ed8">${f.label}</h3>
-<p style="white-space:pre-wrap;line-height:1.9;margin:0">${esc(val)}</p></div>`:"";
-}).join("")}
+<p style="text-align:center;color:#555;font-size:13px;margin-bottom:24px">탐구주제: ${esc(data.selectedTopic)}</p>
+${items}
 </div>`;
   })() : "";
 
@@ -1743,6 +1780,7 @@ ${evalFields.map(f=>{
   body { font-family: '맑은 고딕','Noto Sans KR',Arial,sans-serif; font-size:14px; line-height:1.9; color:#111; }
   h1,h2,h3 { font-family: '맑은 고딕','Noto Sans KR',Arial,sans-serif; }
   p { margin-bottom:10px; }
+  table { page-break-inside:avoid; }
 </style>
 </head><body>${reportSection}${evalSection}</body></html>`;
 
@@ -1820,15 +1858,18 @@ function buildEvalHTML(data){
   const ev=data.selfEval||{};
   const cr=data.correctedEval||{};
   const evalFields=[{key:"motivation",label:"동기"},{key:"process",label:"과정"},{key:"skills",label:"강화된 역량"},{key:"learned",label:"새롭게 알게 된 점"},{key:"future",label:"추후 탐구"}];
+  const items=evalFields.map(f=>{const val=cr[f.key]||ev[f.key]||"";
+    return val?`<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:8px 0;page-break-inside:avoid">
+<tr><td style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px">
+<p style="font-size:14px;font-weight:bold;margin:0 0 6px;color:#1d4ed8">${f.label}</p>
+<p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111;font-size:14px">${esc(val)}</p>
+</td></tr></table>`:"";
+  }).filter(Boolean).join("\n");
   return `<div style="page-break-before:always;padding-top:20px">
 <h1 style="text-align:center;font-size:22px;margin-bottom:4px">자기평가서</h1>
 <p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
-<p style="text-align:center;color:#555;font-size:13px;margin-bottom:36px">탐구주제: ${esc(data.selectedTopic)}</p>
-${evalFields.map(f=>{const val=cr[f.key]||ev[f.key]||"";
-  return val?`<div style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:14px 18px;margin:10px 0;border-radius:4px">
-<h3 style="font-size:14px;margin:0 0 8px;color:#1d4ed8">${f.label}</h3>
-<p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111">${esc(val)}</p></div>`:"";
-}).join("")}
+<p style="text-align:center;color:#555;font-size:13px;margin-bottom:24px">탐구주제: ${esc(data.selectedTopic)}</p>
+${items}
 </div>`;
 }
 
@@ -3113,7 +3154,7 @@ function ReportHomeScreen({user,onLogout,onNewReport,onLoadReport,showCoin,onCoi
 
 // ─── P13: 말투 변환 & 최종 출력 ──────────────────────────────────────────
 function P13({data,set,onPrev,onFinish}){
-  const [style,setStyle]=useState("");
+  const [style,setStyle]=useState(data.styledReportStyle||data.preferredStyle||"");
   const [loading,setLoading]=useState(false);
   const [progress,setProgress]=useState("");
   const [converted,setConverted]=useState(data.styledReport||null);
