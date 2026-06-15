@@ -643,7 +643,7 @@ function Page2({data,set,onPrev,onNext}){
     <div className="divider"/>
     <div className="sec-label">말투 스타일 선택 (선택사항)</div>
     <div className="info-box" style={{marginBottom:10}}>
-      ✏️ 보고서 작성 전에 원하는 말투 스타일을 미리 선택할 수 있습니다. 나중에 '말투 변환' 단계에서도 변경 가능합니다.
+      ✏️ 원하는 말투 스타일을 선택하면 <strong>서론·본론·결론 AI 작성 시 자동 반영</strong>됩니다. '말투 변환' 단계에서도 동일하게 적용됩니다.
     </div>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:8}}>
       {[
@@ -1112,13 +1112,24 @@ function Page7({data,set,onPrev,onNext}){
   const [loading,setLoading]=useState(false);
   const [which,setWhich]=useState(null); // 'all'|'motivation'|'purpose'|'necessity'
 
+  const STYLE_DESC_MAP={
+    natural:"AI가 작성한 것 같지 않고 고등학생이 직접 쓴 것처럼 자연스러운 문체. 너무 매끄럽지 않고 약간의 개성이 느껴지도록.",
+    formal:"고등학교 1학년 수준의 적절한 어휘와 명확한 문장 구조.",
+    middle:"중학생도 이해할 수 있는 쉬운 단어와 문장.",
+    simple:"전문용어와 어려운 단어를 최대한 줄이고 일상적인 표현으로.",
+    informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
+    academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
+  };
+  const styleInstruction=data.preferredStyle&&STYLE_DESC_MAP[data.preferredStyle]
+    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${STYLE_DESC_MAP[data.preferredStyle]}`:"";
+
   const gen=async(target)=>{
     setLoading(true); setWhich(target);
     try{
       const base=`주제:${data.selectedTopic} / 분야:${data.field} / 학년:${data.grade} / 질문들:${data.questions.map(q=>q.text).join(", ")} / 분량:${data.pageCount}페이지`;
       if(target==="all"){
         const r=await geminiJSON(`
-고등학생 탐구보고서 서론 작성. ${base}
+고등학생 탐구보고서 서론 작성. ${base}${styleInstruction}
 - 탐구의 동기: 300~500자 (이 주제를 탐구하게 된 개인적 계기, 관련 경험, 사회적 배경 포함)
 - 탐구의 목적: 300~500자 (이 탐구를 통해 달성하려는 구체적 목적과 기대 효과)
 - 탐구의 필요성: 300~500자 (이 탐구가 학문적·사회적으로 필요한 이유)
@@ -1126,7 +1137,7 @@ JSON: {"motivation":"내용","purpose":"내용","necessity":"내용"}`);
         if(r) set(p=>({...p,intro:{...p.intro,...r}}));
       } else {
         const specs={motivation:"탐구의 동기 (300~500자): 이 주제를 탐구하게 된 개인적 계기, 관련 경험, 사회적 배경 포함",purpose:"탐구의 목적 (300~500자): 이 탐구를 통해 달성하려는 구체적 목적과 기대 효과",necessity:"탐구의 필요성 (300~500자): 이 탐구가 학문적·사회적으로 필요한 이유"};
-        const r=await geminiJSON(`고등학생 탐구보고서 서론 중 하나만 작성. ${base}\n작성항목: ${specs[target]}\nJSON: {"content":"내용"}`);
+        const r=await geminiJSON(`고등학생 탐구보고서 서론 중 하나만 작성. ${base}${styleInstruction}\n작성항목: ${specs[target]}\nJSON: {"content":"내용"}`);
         if(r?.content) set(p=>({...p,intro:{...p.intro,[target]:r.content}}));
       }
     }catch(e){}
@@ -1142,6 +1153,9 @@ JSON: {"motivation":"내용","purpose":"내용","necessity":"내용"}`);
   return <div className="fade">
     <PH page={7} title="서론 작성" sub="탐구의 동기·목적·필요성을 작성하세요. (각 300~500자 권장)"/>
     <div className="info-box">주제: <strong>{data.selectedTopic}</strong></div>
+    {data.preferredStyle&&<div style={{fontSize:11,color:"var(--success)",marginBottom:12,padding:"6px 10px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:"var(--r)"}}>
+      ✓ 선택된 문체: <strong>{["자연스러운 학생 글체","고1 수준","중학생 수준","어려운 단어 최소화","반말체","논문체"].find((_,i)=>["natural","formal","middle","simple","informal","academic"][i]===data.preferredStyle)||data.preferredStyle}</strong> — AI 작성 시 자동 반영됩니다.
+    </div>}
     <div className="btn-row">
       <button className="btn btn-primary" onClick={()=>gen("all")} disabled={loading}>🤖 서론 전체 AI 작성</button>
       <button className="btn btn-warn" onClick={()=>gen("all")} disabled={loading}>🔄 전체 다시 작성</button>
@@ -1237,6 +1251,17 @@ function Page8({data,set,onPrev,onNext}){
   };
 
   // ── AI gen ────────────────────────────────────────────────────────────────
+  const BODY_STYLE_DESC={
+    natural:"AI가 작성한 것 같지 않고 고등학생이 직접 쓴 것처럼 자연스러운 문체.",
+    formal:"고등학교 1학년 수준의 적절한 어휘와 명확한 문장 구조.",
+    middle:"중학생도 이해할 수 있는 쉬운 단어와 문장.",
+    simple:"전문용어와 어려운 단어를 최대한 줄이고 일상적인 표현으로.",
+    informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
+    academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
+  };
+  const bodyStyleInstruction=data.preferredStyle&&BODY_STYLE_DESC[data.preferredStyle]
+    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${BODY_STYLE_DESC[data.preferredStyle]}`:"";
+
   const genOne=async(i)=>{
     setLoadingIdx(i);
     try{
@@ -1250,7 +1275,7 @@ function Page8({data,set,onPrev,onNext}){
 학년: ${data.grade} / 분량목표: ${data.pageCount}페이지
 서술방식: ${style}
 분량: 500~700자
-요구사항: 정확한 사실과 근거, 논리적 흐름, 고등학생 수준 용어
+요구사항: 정확한 사실과 근거, 논리적 흐름, 고등학생 수준 용어${bodyStyleInstruction}
 ${data.bodyStyle==="outline"?"- 각 소주제는 '■ 소주제명' 형식으로 시작":""}
 JSON: {"content":"본론 내용"}`);
       if(r?.content) set(p=>({...p,body:{...p.body,[`q${i}`]:r.content}}));
@@ -1367,6 +1392,9 @@ JSON: {"content":"본론 내용"}`);
         서술방식: {data.bodyStyle==="prose"?"서술형":"소주제 분류형"}
       </span>
     </div>
+    {data.preferredStyle&&<div style={{fontSize:11,color:"var(--success)",marginBottom:12,padding:"6px 10px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:"var(--r)"}}>
+      ✓ 선택된 문체: <strong>{["자연스러운 학생 글체","고1 수준","중학생 수준","어려운 단어 최소화","반말체","논문체"].find((_,i)=>["natural","formal","middle","simple","informal","academic"][i]===data.preferredStyle)||data.preferredStyle}</strong> — AI 작성 시 자동 반영됩니다.
+    </div>}
     <div className="btn-row">
       <button className="btn btn-primary" onClick={genAll} disabled={loading||loadingIdx!==null}>
         {loading?"생성 중...":"🤖 본론 전체 AI 작성"}
@@ -1447,11 +1475,23 @@ function Page9({data,set,onPrev,onNext}){
         return "["+q.text+"]\n"+body;
       }).join("\n\n");
 
+      const CONC_STYLE_DESC={
+        natural:"AI가 작성한 것 같지 않고 고등학생이 직접 쓴 것처럼 자연스러운 문체.",
+        formal:"고등학교 1학년 수준의 적절한 어휘와 명확한 문장 구조.",
+        middle:"중학생도 이해할 수 있는 쉬운 단어와 문장.",
+        simple:"전문용어와 어려운 단어를 최대한 줄이고 일상적인 표현으로.",
+        informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
+        academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
+      };
+      const concStyleInstr=data.preferredStyle&&CONC_STYLE_DESC[data.preferredStyle]
+        ?"\n문체 지시: 반드시 다음 스타일로 작성할 것 → "+CONC_STYLE_DESC[data.preferredStyle]:"";
+
       const prompt=
         "고등학생 탐구보고서 결론 작성.\n"+
         "주제: "+(data.selectedTopic||"")+" / 학년: "+(data.grade||"")+"\n"+
         "서론 동기: "+(data.intro?.motivation||"").slice(0,200)+"\n"+
-        "본론 요약: "+bodyText.slice(0,800)+"\n\n"+
+        "본론 요약: "+bodyText.slice(0,800)+"\n"+
+        concStyleInstr+"\n\n"+
         "작성 기준:\n"+
         "- 탐구 요약: 500~700자 (전체 탐구 내용 종합 정리)\n"+
         "- 알게 된 점: 300~500자 (새롭게 알게 된 사실과 인사이트)\n"+
@@ -1486,6 +1526,9 @@ function Page9({data,set,onPrev,onNext}){
   return <div className="fade">
     <PH page={9} title="결론 작성" sub="탐구를 마무리하는 결론을 작성하세요."/>
     <div className="info-box">주제: <strong>{data.selectedTopic}</strong></div>
+    {data.preferredStyle&&<div style={{fontSize:11,color:"var(--success)",marginBottom:12,padding:"6px 10px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:"var(--r)"}}>
+      ✓ 선택된 문체: <strong>{["자연스러운 학생 글체","고1 수준","중학생 수준","어려운 단어 최소화","반말체","논문체"].find((_,i)=>["natural","formal","middle","simple","informal","academic"][i]===data.preferredStyle)||data.preferredStyle}</strong> — AI 작성 시 자동 반영됩니다.
+    </div>}
     <div className="btn-row">
       <button className="btn btn-primary" onClick={genAll} disabled={loading}>🤖 결론 전체 AI 작성</button>
       <button className="btn btn-warn" onClick={genAll} disabled={loading}>🔄 전체 다시 작성</button>
@@ -1758,13 +1801,13 @@ ${(data.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-t
     const evalFields=[{key:"motivation",label:"동기"},{key:"process",label:"과정"},{key:"skills",label:"강화된 역량"},{key:"learned",label:"새롭게 알게 된 점"},{key:"future",label:"추후 탐구"}];
     const items=evalFields.map(f=>{
       const val=cr[f.key]||ev[f.key]||"";
-      return val?`<table width="100%" style="border-collapse:collapse;margin:8px 0;page-break-inside:avoid">
-<tr><td style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px;border-radius:4px">
+      return val?`<div style="margin:10px 0;page-break-inside:avoid;break-inside:avoid">
+<div style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px;border-radius:0 4px 4px 0">
 <p style="font-size:14px;font-weight:bold;margin:0 0 6px;color:#1d4ed8">${f.label}</p>
 <p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111;font-size:14px">${esc(val)}</p>
-</td></tr></table>`:"";
+</div></div>`:"";
     }).filter(Boolean).join("\n");
-    return `<div style="page-break-before:always;padding-top:20px">
+    return `<div style="page-break-before:always;break-before:page;padding-top:20px">
 <h1 style="text-align:center;font-size:22px;margin-bottom:4px">자기평가서</h1>
 <p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
 <p style="text-align:center;color:#555;font-size:13px;margin-bottom:24px">탐구주제: ${esc(data.selectedTopic)}</p>
@@ -1830,8 +1873,30 @@ function buildReportHTML(data, useCorrected=false){
 <div style="white-space:pre-wrap;font-size:14px;line-height:1.9;color:#111">${esc(data.correctedText)}</div>
 <h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">참고문헌</h2>${refsHTML}`;
   }
+  // 목차 생성
+  const tocQuestions=(data.questions||[]).map((q,i)=>`<tr><td style="padding:3px 0;color:#333;font-size:13px">　　${i+1}. ${esc(q.text)}</td><td style="text-align:right;color:#555;font-size:13px"></td></tr>`).join("");
+  const tocHTML=`<div style="page-break-after:always;padding:40px 0">
+<h2 style="text-align:center;font-size:18px;font-weight:bold;margin-bottom:32px;letter-spacing:2px">목　　차</h2>
+<table width="100%" style="border-collapse:collapse;font-family:'맑은 고딕','Noto Sans KR',Arial,sans-serif">
+<tr><td style="padding:6px 0;font-weight:bold;font-size:14px;border-bottom:1px solid #ccc;color:#111">Ⅰ. 서론</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px">　　1.1 탐구의 동기</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px">　　1.2 탐구의 목적</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px;border-bottom:1px solid #eee">　　1.3 탐구의 필요성</td></tr>
+<tr><td style="padding:6px 0;font-weight:bold;font-size:14px;border-bottom:1px solid #ccc;color:#111">Ⅱ. 본론</td></tr>
+${tocQuestions}
+<tr><td style="border-bottom:1px solid #eee;padding-bottom:4px"></td></tr>
+<tr><td style="padding:6px 0;font-weight:bold;font-size:14px;border-bottom:1px solid #ccc;color:#111">Ⅲ. 결론</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px">　　3.1 탐구 요약</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px">　　3.2 알게 된 점</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px">　　3.3 향상된 역량</td></tr>
+<tr><td style="padding:3px 0;color:#333;font-size:13px;border-bottom:1px solid #eee">　　3.4 추가 탐구 목표</td></tr>
+<tr><td style="padding:6px 0;font-weight:bold;font-size:14px;color:#111">참고문헌</td></tr>
+</table>
+</div>`;
   return `<h1 style="text-align:center;font-size:22px;margin-bottom:4px">${esc(data.selectedTopic)}</h1>
-<p style="text-align:center;color:#555;font-size:13px;margin-bottom:40px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
+<p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
+<p style="text-align:center;color:#888;font-size:12px;margin-bottom:0">${new Date().toLocaleDateString("ko-KR")}</p>
+${tocHTML}
 <h2 style="font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin-top:30px">Ⅰ. 서론</h2>
 <h3 style="font-size:14px;color:#333;margin-top:18px;margin-bottom:6px">1.1 탐구의 동기</h3><p style="white-space:pre-wrap;line-height:1.9;color:#111">${esc(data.intro?.motivation||"")}</p>
 <h3 style="font-size:14px;color:#333;margin-top:18px;margin-bottom:6px">1.2 탐구의 목적</h3><p style="white-space:pre-wrap;line-height:1.9;color:#111">${esc(data.intro?.purpose||"")}</p>
@@ -1859,24 +1924,17 @@ function buildEvalHTML(data){
   const cr=data.correctedEval||{};
   const evalFields=[{key:"motivation",label:"동기"},{key:"process",label:"과정"},{key:"skills",label:"강화된 역량"},{key:"learned",label:"새롭게 알게 된 점"},{key:"future",label:"추후 탐구"}];
   const items=evalFields.map(f=>{const val=cr[f.key]||ev[f.key]||"";
-    return val?`<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:8px 0;page-break-inside:avoid">
-<tr><td style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px">
-<p style="font-size:14px;font-weight:bold;margin:0 0 6px;color:#1d4ed8">${f.label}</p>
-<p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111;font-size:14px">${esc(val)}</p>
-</td></tr></table>`:"";
+    return val?`<div style="margin:10px 0;page-break-inside:avoid;break-inside:avoid"><div style="background:#f0f4ff;border-left:4px solid #3b82f6;padding:12px 16px;border-radius:0 4px 4px 0"><p style="font-size:14px;font-weight:bold;margin:0 0 6px;color:#1d4ed8">${f.label}</p><p style="white-space:pre-wrap;line-height:1.9;margin:0;color:#111;font-size:14px">${esc(val)}</p></div></div>`:"";
   }).filter(Boolean).join("\n");
-  return `<div style="page-break-before:always;padding-top:20px">
-<h1 style="text-align:center;font-size:22px;margin-bottom:4px">자기평가서</h1>
-<p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p>
-<p style="text-align:center;color:#555;font-size:13px;margin-bottom:24px">탐구주제: ${esc(data.selectedTopic)}</p>
-${items}
-</div>`;
+  return `<div style="page-break-before:always;break-before:page;padding-top:20px"><h1 style="text-align:center;font-size:22px;margin-bottom:4px">자기평가서</h1><p style="text-align:center;color:#555;font-size:13px;margin-bottom:8px">${esc(data.school)} ${esc(data.grade)} ${esc(data.name)}</p><p style="text-align:center;color:#555;font-size:13px;margin-bottom:24px">탐구주제: ${esc(data.selectedTopic)}</p>${items}</div>`;
 }
 
 const PDF_BASE_STYLE=`@page{size:A4;margin:2.5cm}
 body{font-family:'맑은 고딕','Noto Sans KR',Arial,sans-serif;font-size:14px;line-height:1.9;color:#111;background:#fff;padding:0;margin:0}
 h1,h2,h3{font-family:'맑은 고딕','Noto Sans KR',Arial,sans-serif}
-p{margin-bottom:10px}a{color:#1d4ed8}`;
+p{margin-bottom:10px}a{color:#1d4ed8}
+div[style*="page-break-inside"]{page-break-inside:avoid;break-inside:avoid}
+.eval-block{page-break-inside:avoid;break-inside:avoid;margin:10px 0}`;
 
 function downloadPDFBlob(htmlBody, filename){
   const full=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${filename}</title>
