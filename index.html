@@ -235,9 +235,6 @@ textarea{resize:vertical;min-height:80px;}
 </div>
 <div id="root"></div>
 <script>
-</div>
-<div id="root"></div>
-<script>
 // 전역 오류 핸들러 - JS 오류 시 화면에 표시
 window.onerror = function(msg, src, line, col, err) {
   // crossorigin 없는 외부 스크립트의 "Script error."는 무시
@@ -254,7 +251,8 @@ window.onerror = function(msg, src, line, col, err) {
   }
 };
 window.addEventListener('unhandledrejection', function(e) {
-  window.onerror('Promise 오류: ' + (e.
+  window.onerror('Promise 오류: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+});
 </script>
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback} = React;
