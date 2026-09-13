@@ -370,7 +370,6 @@ async function claudeMessages(prompt, {temperature=0.7, maxTokens=8192, tools=nu
     const body={
       model,
       max_tokens:maxTokens,
-      temperature,
       messages:[{role:"user",content:prompt}]
     };
     if(tools) body.tools=tools;
