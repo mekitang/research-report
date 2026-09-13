@@ -297,25 +297,27 @@ function makeFilename(data,suffix){
 
 
 // ─── Config ───────────────────────────────────────────────────────────────
-let GEMINI_KEY = ""; // Firestore adminConfig/gemini 에서 로드
-const MODEL = "gemini-2.5-flash";
+let CLAUDE_KEY = ""; // Firestore adminConfig/claude 에서 로드
+const MODEL = "claude-sonnet-5";           // 실제 보고서 내용(서론/본론/결론/자기평가서) 작성용 — 품질 우선
+const MODEL_FAST = "claude-haiku-4-5-20251001"; // 추천·정렬·교정·말투변환 등 가벼운 작업용 — 비용 절감
+const ANTHROPIC_VERSION = "2023-06-01";
 const PAGES   = ["기본정보","관심분야","주제추천","소주제구성","작성방식","서론","본론","결론","전체보기","교정본","자기평가서","말투변환"];
 
-// ─── Gemini helpers ───────────────────────────────────────────────────────
+// ─── Claude(Anthropic) helpers ─────────────────────────────────────────────
 // ─── Firebase helpers ─────────────────────────────────────────────────────
 const waitFb=()=>new Promise(r=>{
   if(window._fbReady)return r();
   window.addEventListener("firebase-ready",r,{once:true});
 });
 
-async function loadGeminiKey(){
-  if(GEMINI_KEY) return true;
+async function loadClaudeKey(){
+  if(CLAUDE_KEY) return true;
   try{
     await waitFb();
     const {doc,getDoc}=window._fbFns;
-    const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
+    const snap=await getDoc(doc(window._fbDb,"adminConfig","claude"));
     if(snap.exists()&&snap.data().apiKey){
-      GEMINI_KEY=snap.data().apiKey;
+      CLAUDE_KEY=snap.data().apiKey;
       return true;
     }
   }catch(e){console.warn("키 로드 실패:",e.message);}
@@ -326,7 +328,7 @@ async function loadGeminiKey(){
 
 
 // ─── API 재시도 유틸리티 ────────────────────────────────────────────────────
-// 503/429 과부하 시 자동 재시도 (최대 3회, 지수 백오프)
+// 429/529 과부하 시 자동 재시도 (최대 3회, 지수 백오프)
 async function withRetry(fn, maxRetries=5, label="API") {
   for(let attempt=0; attempt<=maxRetries; attempt++){
     try{
@@ -335,11 +337,14 @@ async function withRetry(fn, maxRetries=5, label="API") {
       const msg = e.message||"";
       const isOverload = msg.includes("high demand") ||
                          msg.includes("overloaded") ||
+                         msg.includes("overloaded_error") ||
                          msg.includes("503") ||
+                         msg.includes("529") ||
                          msg.includes("UNAVAILABLE") ||
                          msg.includes("429") ||
                          msg.includes("quota") ||
                          msg.includes("rate limit") ||
+                         msg.includes("rate_limit_error") ||
                          msg.includes("RESOURCE_EXHAUSTED");
       if(isOverload && attempt < maxRetries){
         // 지수 백오프: 3초, 6초, 12초, 24초, 48초
@@ -356,65 +361,66 @@ async function withRetry(fn, maxRetries=5, label="API") {
 // 연속 호출 간 딜레이 (API 부하 분산)
 const sleep = (ms) => new Promise(r=>setTimeout(r,ms));
 
-async function gemini(prompt) {
-  if(!GEMINI_KEY){
-    const ok=await loadGeminiKey();
+async function claudeMessages(prompt, {temperature=0.7, maxTokens=8192, tools=null, model=MODEL}={}){
+  if(!CLAUDE_KEY){
+    const ok=await loadClaudeKey();
     if(!ok) throw new Error("AI 키가 설정되지 않았습니다. 관리자에게 문의하세요.");
   }
   return withRetry(async()=>{
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+    const body={
+      model,
+      max_tokens:maxTokens,
+      temperature,
+      messages:[{role:"user",content:prompt}]
+    };
+    if(tools) body.tools=tools;
+    const res=await fetch(
+      "https://api.anthropic.com/v1/messages",
       { method:"POST",
-        headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
-        body:JSON.stringify({
-          contents:[{parts:[{text:prompt}],role:"user"}],
-          generationConfig:{temperature:.7,maxOutputTokens:8192}
-        })
+        headers:{
+          "Content-Type":"application/json",
+          "x-api-key":CLAUDE_KEY,
+          "anthropic-version":ANTHROPIC_VERSION,
+          "anthropic-dangerous-direct-browser-access":"true"
+        },
+        body:JSON.stringify(body)
       }
     );
     if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API 오류");}
     const d=await res.json();
-    const raw=d.candidates?.[0]?.content?.parts?.map(p=>p.text).join("")||"";
-    return cleanMarkdown(raw);
-  }, 3, "gemini");
-}
-async function geminiRaw(prompt) {
-  if(!GEMINI_KEY){ const ok=await loadGeminiKey(); if(!ok) throw new Error("AI 키 없음"); }
-  return withRetry(async()=>{
-    const res=await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-      {method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":GEMINI_KEY},
-       body:JSON.stringify({
-         contents:[{parts:[{text:prompt}],role:"user"}],
-         generationConfig:{temperature:0.2,maxOutputTokens:8192}
-       })}
-    );
-    if(!res.ok){
-      const e=await res.json();
-      throw new Error(e.error?.message||"API 오류");
-    }
-    const d=await res.json();
-    const parts=d.candidates?.[0]?.content?.parts||[];
-    return parts.filter(p=>p.text).map(p=>p.text).join("")||"";
-  }, 3, "geminiRaw");
+    const parts=(d.content||[]).filter(p=>p.type==="text").map(p=>p.text);
+    return parts.join("")||"";
+  }, 3, "claude");
 }
 
-async function geminiJSON(prompt) {
-  const raw=await geminiRaw(prompt+"\n\n[중요] 반드시 순수 JSON만 출력하세요. 설명, ```json 코드블록, 마크다운 없이 JSON 객체만 반환.");
-  console.log("geminiJSON raw:", raw.slice(0,300));
-  // 1. 코드블록 제거
+async function gemini(prompt, opts={}) {
+  const raw=await claudeMessages(prompt,{temperature:.7,maxTokens:8192,model:MODEL,...opts});
+  return cleanMarkdown(raw);
+}
+async function geminiRaw(prompt, opts={}) {
+  return claudeMessages(prompt,{temperature:0.2,maxTokens:8192,model:MODEL,...opts});
+}
+
+// 참고문헌 검색 등 실제 웹 자료가 필요한 요청 — Claude 내장 web_search 툴 사용 (캐시 미적용: 매번 최신 검색)
+async function claudeSearchRaw(prompt) {
+  return claudeMessages(prompt,{
+    temperature:0.2,
+    maxTokens:6144,
+    model:MODEL,
+    tools:[{type:"web_search_20250305",name:"web_search",max_uses:10}]
+  });
+}
+
+function parseJSONLoose(raw, openCh, closeCh){
   let cleaned=raw.replace(/```json\s*/g,"").replace(/```\s*/g,"").trim();
-  // 2. JSON 객체 추출
-  const s=cleaned.indexOf("{"); const e=cleaned.lastIndexOf("}");
+  const s=cleaned.indexOf(openCh); const e=cleaned.lastIndexOf(closeCh);
   if(s<0||e<0){
     console.warn("JSON 없음, raw:", cleaned.slice(0,200));
     return null;
   }
   const jsonStr=cleaned.slice(s,e+1);
-  // 3. 파싱 시도
   try{ return JSON.parse(jsonStr); }
   catch(err){
-    // 4. 제어문자 제거 후 재시도
     try{
       const fixed=jsonStr.replace(/[\x00-\x1F\x7F]/g," ").replace(/,\s*}/g,"}").replace(/,\s*]/g,"]");
       return JSON.parse(fixed);
@@ -423,6 +429,53 @@ async function geminiJSON(prompt) {
       return null;
     }
   }
+}
+
+async function geminiJSON(prompt, opts={}) {
+  const raw=await geminiRaw(prompt+"\n\n[중요] 반드시 순수 JSON만 출력하세요. 설명, ```json 코드블록, 마크다운 없이 JSON 객체만 반환.", opts);
+  console.log("geminiJSON raw:", raw.slice(0,300));
+  return parseJSONLoose(raw,"{","}");
+}
+
+// 참고문헌 검색: 실제 웹 검색 결과를 바탕으로 JSON 반환 (기본: 배열, {openCh:"{",closeCh:"}"}이면 객체)
+async function claudeSearchJSON(prompt, {openCh="[", closeCh="]"}={}) {
+  const raw=await claudeSearchRaw(prompt+"\n\n[중요] 검색 결과를 바탕으로 답할 것. 다른 설명 없이 순수 JSON만 출력하세요. 코드블록, 마크다운 없이 JSON만 반환.");
+  console.log("claudeSearchJSON raw:", raw.slice(0,300));
+  return parseJSONLoose(raw,openCh,closeCh);
+}
+
+// ── 섹션 일괄 처리 유틸 (교정/말투변환용) ──────────────────────────────────
+// 여러 [레이블]\n내용 섹션을 글자 수 한도 내에서 최대한 묶어 한 번의 API 호출로 처리
+// → 섹션마다 개별 호출하던 것보다 호출 횟수를 크게 줄여 비용을 절감
+async function batchAIProcess(sections, {buildPrompt, aiCall, groupCharLimit=3000, onProgress}={}){
+  const groups=[]; let cur=[]; let curLen=0;
+  sections.forEach(s=>{
+    if(!s.text.trim()) return; // 빈 항목은 그룹에 넣지 않고 원문 그대로 유지
+    if(cur.length>0 && curLen+s.text.length>groupCharLimit){ groups.push(cur); cur=[]; curLen=0; }
+    cur.push(s); curLen+=s.text.length;
+  });
+  if(cur.length) groups.push(cur);
+
+  const resultMap={};
+  for(let gi=0; gi<groups.length; gi++){
+    const group=groups[gi];
+    if(onProgress) onProgress(gi+1, groups.length, group.map(s=>s.label.replace(/[\[\]]/g,"")).join(", "));
+    if(gi>0) await sleep(1200);
+    const block=group.map(s=>s.label+"\n"+s.text).join("\n\n");
+    const raw=await aiCall(buildPrompt(block));
+    const cleaned=raw.replace(/^(교정본|교정\s*결과|변환본|변환\s*결과|다음은|아래는|네,|알겠습니다)[^\n]*\n/i,"").trim();
+    const parts=cleaned.split(/(\[[^\]]+\])/);
+    let curLabel=null;
+    parts.forEach(p=>{
+      if(/^\[[^\]]+\]$/.test(p.trim())){ curLabel=p.trim(); resultMap[curLabel]=""; }
+      else if(curLabel!==null){ resultMap[curLabel]=(resultMap[curLabel]||"")+p; }
+    });
+  }
+  return sections.map(s=>{
+    if(!s.text.trim()) return {label:s.label, text:s.text};
+    const got=resultMap[s.label];
+    return {label:s.label, text: got&&got.trim() ? got.trim() : s.text};
+  });
 }
 
 
@@ -596,7 +649,7 @@ function Page1({data,set,onNext}){
       </div>
       <div className="fg"><label>이름</label><input type="text" placeholder="홍길동" value={data.name} onChange={e=>set(p=>({...p,name:e.target.value}))}/></div>
     </div>
-    <div className="info-box" style={{marginTop:8}}>🔑 AI 기능이 활성화되어 있습니다. 모든 페이지에서 Gemini AI를 바로 사용할 수 있습니다.</div>
+    <div className="info-box" style={{marginTop:8}}>🔑 AI 기능이 활성화되어 있습니다. 모든 페이지에서 Claude AI를 바로 사용할 수 있습니다.</div>
     <div className="divider"/>
     <NavRow page={0} onPrev={()=>{}} onNext={onNext} nextDisabled={!data.school||!data.grade||!data.name}/>
   </div>;
@@ -713,7 +766,8 @@ function Page3({data,set,onPrev,onNext}){
         "고등학생 탐구보고서 본론 소주제를 6개 추천해주세요.\n"+
         "탐구주제: "+topic+"\n학년: "+data.grade+"\n분야: "+data.field+"\n세부관심: "+data.interest+"\n키워드: "+kw+"\n"+
         "조건: 각 소주제는 본론 한 챕터로 작성 가능한 수준, 구체적이고 논리적 흐름이 있어야 함, 이유 2문장 포함\n"+
-        "JSON:{\"subtopics\":[{\"text\":\"소주제\",\"reason\":\"이유\"},{\"text\":\"소주제\",\"reason\":\"이유\"}]}"
+        "JSON:{\"subtopics\":[{\"text\":\"소주제\",\"reason\":\"이유\"},{\"text\":\"소주제\",\"reason\":\"이유\"}]}",
+        {model:MODEL_FAST, maxTokens:2048}
       );
       if(result?.subtopics){
         setSuggestions(result.subtopics.slice(0,6));
@@ -737,7 +791,8 @@ function Page3({data,set,onPrev,onNext}){
         "탐구주제: "+topic+"\n"+
         "현재 소주제 목록:\n"+topicList+"\n\n"+
         "조건: 인과관계·개념 흐름·난이도 순으로 배열, 각 이유 1문장\n"+
-        "JSON:{\"order\":[0,1,2],\"reasons\":[\"이유1\",\"이유2\",\"이유3\"],\"overall\":\"전체 순서 설명\"}"
+        "JSON:{\"order\":[0,1,2],\"reasons\":[\"이유1\",\"이유2\",\"이유3\"],\"overall\":\"전체 순서 설명\"}",
+        {model:MODEL_FAST, maxTokens:2048}
       );
       if(result?.order){
         const newQ=[...data.questions];
@@ -914,7 +969,7 @@ function Page4({data,set,onPrev,onNext}){
 키워드:${data.keywords.join(",")} / 질문:${data.questions.map((q,i)=>i+1+"."+q.text).join("|")}
 난이도: ${lvlDesc[lvl]}
 조건: 고등학교 수준, 학생부 기록 적합, 탐구 가능
-JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`);
+JSON:{"topics":[{"title":"주제","reason":"추천 이유 2-3문장"}]}`, {model:MODEL_FAST, maxTokens:2048});
       if(r?.topics) set(p=>({...p,suggestedTopics:r.topics,selectedTopic:""}));
       else setErr("생성 실패 (응답 파싱 오류). 다시 시도해주세요.");
     }catch(e){
@@ -1021,7 +1076,7 @@ function Page5({data,set,onPrev,onNext}){
 - 현재 질문들: ${data.questions.map((q,i)=>`${i+1}. ${q.text}`).join(" | ")}
 
 각 질문을 바탕으로 본론 소제목을 더 학술적이고 구체적으로 작성해주세요.
-JSON: {"items":["소제목1","소제목2","소제목3"]}`);
+JSON: {"items":["소제목1","소제목2","소제목3"]}`, {model:MODEL_FAST, maxTokens:1024});
       if(r?.items) set(p=>({...p,toc:{...p.toc,body:{items:r.items}}}));
     }catch(e){}
     setLoading(false);
@@ -1156,7 +1211,7 @@ JSON: {"motivation":"내용","purpose":"내용","necessity":"내용"}`);
     </div>}
     <div className="btn-row">
       <button className="btn btn-primary" onClick={()=>gen("all")} disabled={loading}>🤖 서론 전체 AI 작성</button>
-      <button className="btn btn-warn" onClick={()=>gen("all")} disabled={loading}>🔄 전체 다시 작성</button>
+      <button className="btn btn-warn" onClick={()=>{if(window.confirm("이미 작성된 서론을 덮어씁니다. 다시 생성하시겠습니까?"))gen("all");}} disabled={loading}>🔄 전체 다시 작성</button>
     </div>
     {loading&&which==="all"&&<AILoad msg="서론 전체를 작성 중..."/>}
     {sections.map(s=>(
@@ -1397,7 +1452,7 @@ JSON: {"content":"본론 내용"}`);
       <button className="btn btn-primary" onClick={genAll} disabled={loading||loadingIdx!==null}>
         {loading?"생성 중...":"🤖 본론 전체 AI 작성"}
       </button>
-      <button className="btn btn-warn" onClick={genAll} disabled={loading||loadingIdx!==null}>🔄 전체 다시 작성</button>
+      <button className="btn btn-warn" onClick={()=>{if(window.confirm("이미 작성된 본론을 덮어씁니다. 다시 생성하시겠습니까?"))genAll();}} disabled={loading||loadingIdx!==null}>🔄 전체 다시 작성</button>
     </div>
     {loading&&<AILoad msg="전체 본론을 작성 중... (시간이 걸릴 수 있습니다)"/>}
 
@@ -1462,6 +1517,16 @@ function Page9({data,set,onPrev,onNext}){
   const [refLoading,setRefLoading]=useState(false);
   const [newRef,setNewRef]=useState("");
   const [newRefUrl,setNewRefUrl]=useState("");
+  const REF_CATS=[
+    {key:"krNews", label:"국내 기사", hint:"국내 언론사 뉴스·기사"},
+    {key:"krPaper",label:"국내 논문", hint:"국내 학술지 논문(APA)"},
+    {key:"krVideo",label:"국내 동영상",hint:"국내 강의·다큐·뉴스클립"},
+    {key:"enPaper",label:"해외 논문", hint:"해외 학술지 논문(APA)"},
+    {key:"enNews", label:"해외 기사", hint:"해외 언론사 뉴스·기사"},
+    {key:"enVideo",label:"해외 동영상",hint:"해외 강의·다큐"},
+  ];
+  const [refCounts,setRefCounts]=useState({krNews:0,krPaper:0,krVideo:0,enPaper:0,enNews:0,enVideo:0});
+  const refTotal=Object.values(refCounts).reduce((a,b)=>a+(b||0),0);
 
 
   const genAll=async()=>{
@@ -1514,6 +1579,55 @@ function Page9({data,set,onPrev,onNext}){
     }
     setLoading(false); setWhich(null);
   };
+
+  const searchReferences=async()=>{
+    if(!data.selectedTopic){alert("탐구 주제가 없습니다.");return;}
+    if(refTotal<=0){alert("검색할 자료 유형과 개수를 1개 이상 지정하세요.");return;}
+    setRefLoading(true);
+    try{
+      const subtopics=(data.questions||[]).map(q=>q.text).filter(Boolean).join(" / ");
+      const wanted=REF_CATS.filter(c=>(refCounts[c.key]||0)>0);
+      const reqLines=wanted.map(c=>`- ${c.label}(${c.hint}): ${refCounts[c.key]}개`).join("\n");
+      const schema="{"+REF_CATS.map(c=>`"${c.key}":[]`).join(",")+"}";
+      const prompt=
+        "고등학생 탐구보고서에 쓸 참고문헌을 웹 검색으로 찾아주세요.\n"+
+        "탐구 주제: "+(data.selectedTopic||"")+"\n"+
+        "세부 질문: "+subtopics+"\n\n"+
+        "다음 유형별로 정확히 요청한 개수만큼 찾아주세요 (부족하면 있는 만큼만, 요청하지 않은 유형은 빈 배열):\n"+
+        reqLines+"\n\n"+
+        "조건:\n"+
+        "- 실제로 존재하고 지금 접속 가능한 자료만 사용할 것. 자료를 지어내지 말 것.\n"+
+        "- '국내'는 한국 출처(국내 언론사·국내 학술지·국내 채널)만, '해외'는 한국 밖 출처만 사용할 것.\n"+
+        "- 학술논문은 APA 7판 형식(저자. (연도). 제목. 학술지, 권(호), 페이지.)으로 작성.\n"+
+        "- 기사는 '언론사. (연도, 월 일). 제목.' 형식으로 작성.\n"+
+        "- 동영상은 '채널명/제작자. (연도). 영상 제목 [동영상].' 형식으로 작성.\n"+
+        "- 각 항목 끝에 실제 URL을 그대로 이어서 표기할 것 (괄호 없이 공백으로 구분).\n\n"+
+        "JSON 객체로만 반환: "+schema;
+      const result=await claudeSearchJSON(prompt,{openCh:"{",closeCh:"}"});
+      if(result&&typeof result==="object"){
+        const flat=[];
+        REF_CATS.forEach(c=>{
+          (result[c.key]||[]).forEach(item=>{
+            if(typeof item==="string"&&item.trim()) flat.push(`[${c.label}] `+item.trim());
+          });
+        });
+        if(flat.length>0){
+          const existing=data.conclusion?.refs||[];
+          const merged=[...existing,...flat.filter(r=>!existing.includes(r))];
+          set(p=>({...p,conclusion:{...p.conclusion,refs:merged}}));
+        }else{
+          alert("참고문헌을 찾지 못했습니다. 주제를 더 구체화하거나 직접 추가해주세요.");
+        }
+      }else{
+        alert("참고문헌을 찾지 못했습니다. 주제를 더 구체화하거나 직접 추가해주세요.");
+      }
+    }catch(e){
+      console.error("참고문헌 검색 오류:", e);
+      alert("참고문헌 검색 오류: "+e.message);
+    }
+    setRefLoading(false);
+  };
+
   const sections=[
     {key:"summary",label:"탐구 요약",min:500,max:700,ph:"탐구의 핵심 내용을 요약하세요. (500~700자)"},
     {key:"learned",label:"알게 된 점",min:300,max:500,ph:"탐구를 통해 새롭게 알게 된 점을 서술하세요. (300~500자)"},
@@ -1529,7 +1643,7 @@ function Page9({data,set,onPrev,onNext}){
     </div>}
     <div className="btn-row">
       <button className="btn btn-primary" onClick={genAll} disabled={loading}>🤖 결론 전체 AI 작성</button>
-      <button className="btn btn-warn" onClick={genAll} disabled={loading}>🔄 전체 다시 작성</button>
+      <button className="btn btn-warn" onClick={()=>{if(window.confirm("이미 작성된 결론을 덮어씁니다. 다시 생성하시겠습니까?"))genAll();}} disabled={loading}>🔄 전체 다시 작성</button>
     </div>
     {loading&&<AILoad msg="결론 및 참고문헌을 작성 중..."/>}
     {sections.map(s=>(
@@ -1540,7 +1654,33 @@ function Page9({data,set,onPrev,onNext}){
       </div>
     ))}
     <div className="divider"/>
-    <div className="sec-label">참고문헌</div>
+    <div className="sec-label" style={{marginBottom:10}}>참고문헌</div>
+    <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"14px 16px",marginBottom:10}}>
+      <div style={{fontSize:12,color:"var(--text2)",marginBottom:10,fontWeight:600}}>🔍 AI 참고문헌 검색 — 유형별 개수 지정</div>
+      <div className="fr3">
+        {REF_CATS.map(c=>(
+          <div key={c.key} className="fg" style={{marginBottom:0}}>
+            <label>{c.label}</label>
+            <input type="text" inputMode="numeric" pattern="[0-9]*"
+              value={refCounts[c.key]}
+              onChange={e=>{
+                const n=Math.max(0,Math.min(5,parseInt(e.target.value.replace(/[^0-9]/g,""))||0));
+                setRefCounts(p=>({...p,[c.key]:n}));
+              }}/>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:12}}>
+        <span style={{fontSize:11,color:"var(--text3)"}}>유형당 최대 5개 · 총 {refTotal}개 검색 예정</span>
+        <button className="btn btn-ghost" style={{fontSize:11,padding:"5px 11px"}} onClick={searchReferences} disabled={refLoading||refTotal<=0}>
+          {refLoading?"검색 중...":`🔍 검색 실행${refTotal>0?` (${refTotal}개)`:""}`}
+        </button>
+      </div>
+    </div>
+    {refLoading&&<AILoad msg="웹에서 참고문헌을 검색하는 중..."/>}
+    <div style={{fontSize:11,color:"var(--text3)",marginBottom:10,lineHeight:1.6}}>
+      AI가 웹 검색으로 찾아준 자료도 <strong style={{color:"var(--warn)"}}>반드시 링크에 직접 들어가 내용을 확인</strong>한 뒤 사용하세요.
+    </div>
     {(()=>{
       const apaRefs=data.conclusion?.refs||[];
       const qLinks=[];
@@ -2019,6 +2159,38 @@ function Page10({data,set,onPrev,onNext}){
       <h2 style={{textAlign:"center",borderBottom:"none",paddingBottom:0}}>{data.selectedTopic}</h2>
       <p style={{textAlign:"center",color:"var(--text3)",fontSize:12,marginTop:4}}>{data.school} {data.grade} {data.name}</p>
     </div>
+
+    {/* ── 목차 ── */}
+    <div className="sec-label" style={{marginTop:20}}>목차</div>
+    <div className="toc-sec">
+      <div className="toc-hd"><span>Ⅰ. 서론</span><span className="toc-badge">INTRO</span></div>
+      <div className="toc-items">
+        {[data.toc?.intro?.motivation,data.toc?.intro?.purpose,data.toc?.intro?.necessity]
+          .filter(Boolean).map((t,i)=>(
+            <div key={i} className="toc-item"><div className="toc-dot"/><span>{t}</span></div>
+          ))}
+      </div>
+    </div>
+    <div className="toc-sec">
+      <div className="toc-hd"><span>Ⅱ. 본론</span><span className="toc-badge">BODY</span></div>
+      <div className="toc-items">
+        {(data.questions||[]).map((q,i)=>{
+          const label=data.toc?.body?.items?.[i]||q.text||`${i+1}번째 항목`;
+          return <div key={i} className="toc-item"><div className="toc-dot"/><span>{i+1}. {label}</span></div>;
+        })}
+      </div>
+    </div>
+    <div className="toc-sec">
+      <div className="toc-hd"><span>Ⅲ. 결론</span><span className="toc-badge">CONCLUSION</span></div>
+      <div className="toc-items">
+        {[data.toc?.conclusion?.summary,data.toc?.conclusion?.learned,data.toc?.conclusion?.skills,
+          data.toc?.conclusion?.future,data.toc?.conclusion?.refs]
+          .filter(Boolean).map((t,i)=>(
+            <div key={i} className="toc-item"><div className="toc-dot"/><span>{t}</span></div>
+          ))}
+      </div>
+    </div>
+
     <div className="prev-sec">
       <h2>Ⅰ. 서론</h2>
       <h3>1.1 탐구의 동기</h3><SectionEdit field="intro" subKey="motivation" rows={6}/>
@@ -2077,17 +2249,6 @@ function Page11({data,set,onPrev,onNext}){
   const [progress,setProgress]=useState("");
   const [corrected,setCorrected]=useState(data.correctedText||null);
 
-  const correctSection=async(text)=>{
-    if(!text.trim()) return text;
-    const r=await gemini(
-`당신은 국어 전문 교정 편집자입니다. 아래 텍스트의 문법·맞춤법·어색한 표현만 수정해 주세요.
-규칙: 원문 내용·분량·문장수를 반드시 유지. 설명·안내문 절대 추가 금지. 교정된 텍스트만 출력.
-
-${text}`
-    );
-    return r.replace(/^(교정본|교정\s*결과|다음은|아래는|네,|알겠습니다)[^\n]*\n/i,"").trim();
-  };
-
   const correct=async()=>{
     setLoading(true); setProgress("준비 중..."); setCorrected(null);
     try{
@@ -2104,20 +2265,17 @@ ${text}`
         {label:"[결론-역량]",    text:data.conclusion?.skills||""},
         {label:"[결론-추가목표]",text:data.conclusion?.future||""},
       ];
-      const total=sections.filter(s=>s.text.trim()).length;
-      let done=0;
-      const results=[];
-      for(const s of sections){
-        if(s.text.trim()){
-          done++;
-          setProgress(`(${done}/${total}) ${s.label.replace(/[\[\]]/g,"")} 교정 중...`);
-          const fixed=await correctSection(s.text);
-          results.push(s.label+"\n"+fixed);
-        } else {
-          results.push(s.label+"\n"+s.text);
-        }
-      }
-      const final=results.join("\n\n");
+      const processed=await batchAIProcess(sections,{
+        buildPrompt:(block)=>
+`당신은 국어 전문 교정 편집자입니다. 아래는 [레이블]로 구분된 여러 섹션입니다.
+규칙: 각 섹션의 문법·맞춤법·어색한 표현만 수정. 원문 내용·분량·문장수 반드시 유지. [레이블]은 원문 그대로 남길 것. 설명·안내문 절대 추가 금지. 교정된 전체 텍스트만 출력.
+
+${block}`,
+        aiCall:(p)=>gemini(p,{model:MODEL_FAST}),
+        groupCharLimit:3000,
+        onProgress:(done,total,labels)=>setProgress(`(${done}/${total}) 묶음 교정 중... [${labels}]`)
+      });
+      const final=processed.map(s=>s.label+"\n"+s.text).join("\n\n");
       setCorrected(final);
       set(p=>({...p,correctedText:final}));
       setProgress("");
@@ -2161,7 +2319,7 @@ ${text}`
       </button>
       {corrected&&<button className="btn btn-success" onClick={dlPDF}>📄 교정본 PDF</button>}
       {corrected&&<button className="btn btn-secondary" onClick={()=>downloadDoc(data,makeFilename(data,"교정본")+".doc",false,true)}>📝 교정본 DOC</button>}
-      {corrected&&<button className="btn btn-warn" onClick={correct} disabled={loading}>🔄 다시 교정</button>}
+      {corrected&&<button className="btn btn-warn" onClick={()=>{if(window.confirm("전체를 다시 교정합니다. 계속하시겠습니까?"))correct();}} disabled={loading}>🔄 다시 교정</button>}
     </div>
     {loading&&(
       <div className="ai-load">
@@ -2221,7 +2379,8 @@ JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내
   const correctOne=async(key,text,label)=>{
     if(!text.trim())return;
     try{
-      const r=await gemini(`다음 고등학생 자기평가서의 "${label}" 항목을 문법·맞춤법·표현 교정만 해주세요. 교정된 텍스트만 반환하세요.\n\n${text}`);
+      const r=await gemini(`다음 고등학생 자기평가서의 "${label}" 항목을 문법·맞춤법·표현 교정만 해주세요. 교정된 텍스트만 반환하세요.\n\n${text}`,
+        {model:MODEL_FAST, maxTokens:1024});
       set(p=>({...p,correctedEval:{...p.correctedEval,[key]:r.trim()}}));
     }catch(e){}
   };
@@ -2242,7 +2401,7 @@ JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내
     <PH page={12} title="자기평가서" sub="탐구 활동에 대한 자기평가를 작성하세요. (전체 약 700자)"/>
     <div className="btn-row">
       <button className="btn btn-primary" onClick={aiGenAll} disabled={loading}>🤖 AI 자기평가서 작성</button>
-      <button className="btn btn-warn" onClick={aiGenAll} disabled={loading}>🔄 다시 작성</button>
+      <button className="btn btn-warn" onClick={()=>{if(window.confirm("이미 작성된 자기평가서를 덮어씁니다. 다시 생성하시겠습니까?"))aiGenAll();}} disabled={loading}>🔄 다시 작성</button>
       <button className="btn btn-success" onClick={dlCombinedPDF}>📄 보고서+자기평가서 PDF</button>
     </div>
     {loading&&<AILoad msg="자기평가서를 작성 중..."/>}
@@ -2378,7 +2537,7 @@ function ApiKeyManager(){
       try{
         await waitFb();
         const {doc,getDoc}=window._fbFns;
-        const snap=await getDoc(doc(window._fbDb,"adminConfig","gemini"));
+        const snap=await getDoc(doc(window._fbDb,"adminConfig","claude"));
         if(snap.exists()&&snap.data().apiKey){
           setSaved(snap.data().apiKey);
           setApiKey(snap.data().apiKey);
@@ -2394,12 +2553,12 @@ function ApiKeyManager(){
     try{
       await waitFb();
       const {doc,setDoc,serverTimestamp}=window._fbFns;
-      await setDoc(doc(window._fbDb,"adminConfig","gemini"),{
+      await setDoc(doc(window._fbDb,"adminConfig","claude"),{
         apiKey:apiKey.trim(),
         updatedAt:serverTimestamp()
       });
       setSaved(apiKey.trim());
-      GEMINI_KEY=apiKey.trim();
+      CLAUDE_KEY=apiKey.trim();
       alert("✅ API 키가 저장되었습니다!");
     }catch(e){alert("저장 실패: "+e.message);}
     setSaving(false);
@@ -2407,10 +2566,10 @@ function ApiKeyManager(){
 
   return <div className="fade">
     <div style={{marginBottom:24}}>
-      <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>🔑 Gemini API 키 관리</div>
+      <div style={{fontSize:20,fontWeight:600,marginBottom:4}}>🔑 Claude API 키 관리</div>
       <div style={{fontSize:13,color:"var(--text3)"}}>
-        Google AI Studio에서 발급한 API 키를 입력하세요.<br/>
-        저장된 키는 모든 AI 기능에 사용됩니다.
+        Anthropic Console에서 발급한 API 키를 입력하세요.<br/>
+        저장된 키는 모든 AI 기능(보고서 작성, 참고문헌 검색 포함)에 사용됩니다.
       </div>
     </div>
 
@@ -2423,8 +2582,8 @@ function ApiKeyManager(){
         </div>
       )}
       <div className="fg">
-        <label>Gemini API 키</label>
-        <input type="password" placeholder="AIzaSy..." value={apiKey}
+        <label>Claude API 키</label>
+        <input type="password" placeholder="sk-ant-..." value={apiKey}
           onChange={e=>setApiKey(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&saveKey()}/>
       </div>
@@ -2437,8 +2596,8 @@ function ApiKeyManager(){
             try{
               await waitFb();
               const {doc,setDoc}=window._fbFns;
-              await setDoc(doc(window._fbDb,"adminConfig","gemini"),{apiKey:""});
-              GEMINI_KEY="";
+              await setDoc(doc(window._fbDb,"adminConfig","claude"),{apiKey:""});
+              CLAUDE_KEY="";
               alert("키가 삭제되었습니다.");
             }catch(e){alert("삭제 실패:"+e.message);}
           })();
@@ -2447,9 +2606,10 @@ function ApiKeyManager(){
 
       <div style={{marginTop:24,background:"var(--surface2)",borderRadius:"var(--r2)",padding:"16px",fontSize:12,color:"var(--text3)",lineHeight:1.8}}>
         <div style={{fontWeight:600,color:"var(--text2)",marginBottom:8}}>📌 API 키 발급 방법</div>
-        <div>1. <a href="https://aistudio.google.com/apikey" target="_blank" style={{color:"var(--accent)"}}>Google AI Studio</a> 접속</div>
-        <div>2. "Create API key" 클릭</div>
+        <div>1. <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:"var(--accent)"}}>Anthropic Console</a> 접속</div>
+        <div>2. "Create Key" 클릭</div>
         <div>3. 생성된 키 복사 후 위에 입력</div>
+        <div style={{marginTop:6,color:"var(--warn)"}}>⚠ 이 키는 브라우저에서 직접 호출되므로 유출되지 않도록 주의하세요.</div>
       </div>
     </>}
   </div>;
@@ -3252,29 +3412,25 @@ function P13({data,set,onPrev,onFinish}){
 
     try{
       const sections=buildFullText(data).filter(s=>s.text.trim());
-      const total=sections.length;
-      const results=[];
-
-      for(let i=0;i<sections.length;i++){
-        const s=sections[i];
-        setProgress(`(${i+1}/${total}) ${s.label.replace(/[\[\]]/g,"")} 변환 중...`);
-        if(i>0) await sleep(2000); // 연속 호출 간 2초 딜레이
-        const r=await gemini(`다음 텍스트를 아래 말투 스타일로 변환해주세요.
+      const processed=await batchAIProcess(sections,{
+        buildPrompt:(block)=>
+`다음은 [레이블]로 구분된 여러 섹션입니다. 각 섹션을 아래 말투 스타일로 변환해주세요.
 
 스타일: ${styleDesc[style]}
 
 규칙:
 1. 내용과 사실은 절대 변경하지 말 것
 2. 분량을 줄이거나 문장을 삭제하지 말 것
-3. 변환된 텍스트만 출력 (설명 추가 금지)
+3. [레이블]은 원문 그대로 유지할 것
+4. 변환된 전체 텍스트만 출력 (설명 추가 금지)
 
-원문:
-${s.text}`);
-        const clean=r.replace(/^(변환본|변환 결과|다음은|아래는|네,|알겠습니다)[^\n]*\n/i,"").trim();
-        results.push({label:s.label, text:clean});
-      }
+${block}`,
+        aiCall:(p)=>gemini(p,{model:MODEL_FAST}),
+        groupCharLimit:3000,
+        onProgress:(done,total,labels)=>setProgress(`(${done}/${total}) 묶음 변환 중... [${labels}]`)
+      });
 
-      const final=results.map(r=>r.label+"\n"+r.text).join("\n\n");
+      const final=processed.map(s=>s.label+"\n"+s.text).join("\n\n");
       setConverted(final);
       set(p=>({...p,styledReport:final,styledReportStyle:style}));
       setProgress("");
@@ -3384,7 +3540,7 @@ ${(d.questions||[]).map((q,i)=>`<h3 style="font-size:14px;color:#333;margin-top:
       <button className="btn btn-primary" onClick={convert} disabled={loading||!style}>
         {loading?"변환 중...":"✨ AI 말투 변환"}
       </button>
-      {converted&&<button className="btn btn-warn" onClick={convert} disabled={loading}>🔄 다시 변환</button>}
+      {converted&&<button className="btn btn-warn" onClick={()=>{if(window.confirm("전체를 다시 변환합니다. 계속하시겠습니까?"))convert();}} disabled={loading}>🔄 다시 변환</button>}
     </div>
 
     {loading&&<AILoad msg="전체 보고서를 변환 중입니다..." sub={progress}/>}
@@ -3518,17 +3674,17 @@ function ReportApp({user,onLogout,onCoinUpdate,initData,initReportId,onGoHome}){
         {/* 내용 */}
         <div style={{padding:"24px",lineHeight:1.9,fontSize:14,color:"var(--text2)"}}>
           <p style={{marginBottom:16,color:"var(--text)",fontWeight:600,fontSize:15}}>
-            Autoreport 프로그램은 참고문헌을 추천해주지 않습니다.
+            결론 단계에서 AI가 웹 검색으로 참고문헌을 찾아줄 수 있지만, 결과를 그대로 믿지 마세요.
           </p>
           <p style={{marginBottom:16}}>
             사용자의 <strong style={{color:"var(--accent)"}}>자료탐색역량</strong>과{" "}
             <strong style={{color:"var(--accent)"}}>보고서 내용 이해</strong>를 위해,
-            AI를 활용하여 보고서를 작성할 경우 AI가 작성해준 글을 참고하여{" "}
-            <strong>스스로 참고문헌을 찾아보세요.</strong>
+            AI가 찾아준 자료는 <strong>링크에 직접 들어가 내용을 확인</strong>한 뒤 사용하고,
+            필요하면 아래 방법으로 직접 더 찾아보세요.
           </p>
           <div style={{background:"var(--surface2)",borderRadius:"var(--r)",padding:"14px 16px",
             border:"1px solid var(--border)",fontSize:13}}>
-            <div style={{fontWeight:600,marginBottom:8,color:"var(--text)"}}>📌 참고문헌 검색 방법</div>
+            <div style={{fontWeight:600,marginBottom:8,color:"var(--text)"}}>📌 참고문헌 직접 검색 방법</div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               <div>🔬 <strong>학술논문</strong> →{" "}
                 <a href="https://www.dbpia.co.kr" target="_blank" rel="noopener noreferrer"
