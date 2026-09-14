@@ -436,11 +436,24 @@ async function geminiJSON(prompt, opts={}) {
   return parseJSONLoose(raw,"{","}");
 }
 
-// 참고문헌 검색: 실제 웹 검색 결과를 바탕으로 JSON 반환 (기본: 배열, {openCh:"{",closeCh:"}"}이면 객체)
-async function claudeSearchJSON(prompt, {openCh="[", closeCh="]"}={}) {
-  const raw=await claudeSearchRaw(prompt+"\n\n[중요] 검색 결과를 바탕으로 답할 것. 다른 설명 없이 순수 JSON만 출력하세요. 코드블록, 마크다운 없이 JSON만 반환.");
-  console.log("claudeSearchJSON raw:", raw.slice(0,300));
-  return parseJSONLoose(raw,openCh,closeCh);
+// 참고문헌 검색: 카테고리 하나당 번호 매긴 평문 목록으로 받아 파싱.
+// (web_search 툴을 쓰면 모델이 여러 유형을 한번에 요청할 때 형식을 잘 안 지키는 경우가 많아,
+//  카테고리별로 따로 짧게 요청해서 "번호. 내용" 줄만 받는 방식이 훨씬 안정적이다.)
+function parseNumberedList(raw){
+  return raw.replace(/```/g,"").trim().split("\n")
+    .map(l=>l.trim()).filter(Boolean)
+    .map(l=>l.replace(/^\d+[\.\)]\s*/,"").replace(/^[-•*]\s*/,"").trim())
+    .filter(it=>{
+      if(!it||it.length<8) return false;
+      if(/^\(?(없음|해당\s*없음|none|no\s*results?)\)?\.?$/i.test(it)) return false;
+      if(!/\d/.test(it)) return false; // 실제 인용문에는 보통 연도나 URL의 숫자가 포함됨
+      return true;
+    });
+}
+async function claudeSearchOneCategory(prompt){
+  const raw=await claudeSearchRaw(prompt);
+  console.log("claudeSearchOneCategory raw:", raw.slice(0,500));
+  return parseNumberedList(raw);
 }
 
 // ── 섹션 일괄 처리 유틸 (교정/말투변환용) ──────────────────────────────────
@@ -523,67 +536,81 @@ function CharCount({text,min,max}){
   return <div className={`char-count ${ok?"char-ok":n>0?"char-warn":""}`}>{n}자 {min&&max?`(권장 ${min}~${max}자)`:""}</div>;
 }
 
-// ─── 참고문헌 AI 검색 (유형별 개수 지정) — 결론 작성/전체보기 양쪽에서 공용 ──────
+// ─── 참고문헌 AI 검색 (유형별 개수 지정) — 결론 작성/전체보기/소주제 정하기에서 공용 ──
 const REF_CATS=[
-  {key:"krNews", label:"국내 기사", hint:"국내 언론사 뉴스·기사"},
-  {key:"krPaper",label:"국내 논문", hint:"국내 학술지 논문(APA)"},
-  {key:"krVideo",label:"국내 동영상",hint:"국내 강의·다큐·뉴스클립"},
-  {key:"enPaper",label:"해외 논문", hint:"해외 학술지 논문(APA)"},
-  {key:"enNews", label:"해외 기사", hint:"해외 언론사 뉴스·기사"},
-  {key:"enVideo",label:"해외 동영상",hint:"해외 강의·다큐"},
+  {key:"krNews", label:"국내 기사", hint:"국내 언론사 뉴스·기사", fmt:"언론사. (연도, 월 일). 제목.", origin:"kr"},
+  {key:"krPaper",label:"국내 논문", hint:"국내 학술지 논문(APA)", fmt:"저자. (연도). 제목. 학술지, 권(호), 페이지.", origin:"kr"},
+  {key:"krVideo",label:"국내 동영상",hint:"국내 강의·다큐·뉴스클립", fmt:"채널명/제작자. (연도). 영상 제목.", origin:"kr"},
+  {key:"enPaper",label:"해외 논문", hint:"해외 학술지 논문(APA)", fmt:"Author. (Year). Title. Journal, Volume(Issue), pages.", origin:"en"},
+  {key:"enNews", label:"해외 기사", hint:"해외 언론사 뉴스·기사", fmt:"Publisher. (Year, Month Day). Title.", origin:"en"},
+  {key:"enVideo",label:"해외 동영상",hint:"해외 강의·다큐", fmt:"Channel/Creator. (Year). Title.", origin:"en"},
 ];
-function ReferenceSearchBox({data,set}){
+function ReferenceSearchBox({data,set,autoRun=false}){
   const [refLoading,setRefLoading]=useState(false);
-  const [refCounts,setRefCounts]=useState({krNews:0,krPaper:0,krVideo:0,enPaper:0,enNews:0,enVideo:0});
+  const [refProgress,setRefProgress]=useState("");
+  const [refCounts,setRefCounts]=useState({krNews:5,krPaper:1,krVideo:0,enPaper:0,enNews:0,enVideo:0});
   const refTotal=Object.values(refCounts).reduce((a,b)=>a+(b||0),0);
 
   const searchReferences=async()=>{
     if(!data.selectedTopic){alert("탐구 주제가 없습니다.");return;}
-    if(refTotal<=0){alert("검색할 자료 유형과 개수를 1개 이상 지정하세요.");return;}
+    const wanted=REF_CATS.filter(c=>(refCounts[c.key]||0)>0);
+    if(wanted.length===0){alert("검색할 자료 유형과 개수를 1개 이상 지정하세요.");return;}
     setRefLoading(true);
+    const flat=[]; const emptyCats=[];
     try{
       const subtopics=(data.questions||[]).map(q=>q.text).filter(Boolean).join(" / ");
-      const wanted=REF_CATS.filter(c=>(refCounts[c.key]||0)>0);
-      const reqLines=wanted.map(c=>`- ${c.label}(${c.hint}): ${refCounts[c.key]}개`).join("\n");
-      const schema="{"+REF_CATS.map(c=>`"${c.key}":[]`).join(",")+"}";
-      const prompt=
-        "고등학생 탐구보고서에 쓸 참고문헌을 웹 검색으로 찾아주세요.\n"+
-        "탐구 주제: "+(data.selectedTopic||"")+"\n"+
-        "세부 질문: "+subtopics+"\n\n"+
-        "다음 유형별로 정확히 요청한 개수만큼 찾아주세요 (부족하면 있는 만큼만, 요청하지 않은 유형은 빈 배열):\n"+
-        reqLines+"\n\n"+
-        "조건:\n"+
-        "- 실제로 존재하고 지금 접속 가능한 자료만 사용할 것. 자료를 지어내지 말 것.\n"+
-        "- '국내'는 한국 출처(국내 언론사·국내 학술지·국내 채널)만, '해외'는 한국 밖 출처만 사용할 것.\n"+
-        "- 학술논문은 APA 7판 형식(저자. (연도). 제목. 학술지, 권(호), 페이지.)으로 작성.\n"+
-        "- 기사는 '언론사. (연도, 월 일). 제목.' 형식으로 작성.\n"+
-        "- 동영상은 '채널명/제작자. (연도). 영상 제목 [동영상].' 형식으로 작성.\n"+
-        "- 각 항목 끝에 실제 URL을 그대로 이어서 표기할 것 (괄호 없이 공백으로 구분).\n\n"+
-        "JSON 객체로만 반환: "+schema;
-      const result=await claudeSearchJSON(prompt,{openCh:"{",closeCh:"}"});
-      if(result&&typeof result==="object"){
-        const flat=[];
-        REF_CATS.forEach(c=>{
-          (result[c.key]||[]).forEach(item=>{
-            if(typeof item==="string"&&item.trim()) flat.push(`[${c.label}] `+item.trim());
-          });
-        });
-        if(flat.length>0){
-          const existing=data.conclusion?.refs||[];
-          const merged=[...existing,...flat.filter(r=>!existing.includes(r))];
-          set(p=>({...p,conclusion:{...p.conclusion,refs:merged}}));
-        }else{
-          alert("참고문헌을 찾지 못했습니다. 주제를 더 구체화하거나 직접 추가해주세요.");
+      for(let i=0;i<wanted.length;i++){
+        const c=wanted[i];
+        const n=refCounts[c.key];
+        setRefProgress(`(${i+1}/${wanted.length}) ${c.label} 검색 중...`);
+        if(i>0) await sleep(1200);
+        const originCond=c.origin==="kr"
+          ?"반드시 한국 출처(국내 언론사·국내 학술지·국내 채널)만 사용할 것. 해외 자료는 절대 포함하지 말 것."
+          :"반드시 한국 밖 해외 출처만 사용할 것. 국내 자료는 절대 포함하지 말 것.";
+        const prompt=
+          "고등학생 탐구보고서에 쓸 참고문헌을 웹 검색으로 찾아주세요.\n"+
+          "탐구 주제: "+(data.selectedTopic||"")+"\n"+
+          "세부 질문: "+subtopics+"\n\n"+
+          `"${c.label}"(${c.hint}) 자료를 정확히 ${n}개 찾아주세요.\n\n`+
+          "조건:\n"+
+          "- 실제로 존재하고 지금 접속 가능한 자료만 사용할 것. 자료를 지어내지 말 것.\n"+
+          "- "+originCond+"\n"+
+          "- 형식: '"+c.fmt+"' 형식으로 작성.\n"+
+          "- 각 항목 끝에 실제 URL을 그대로 이어서 표기할 것 (괄호 없이 공백으로 구분).\n\n"+
+          "다른 설명, 인사말, 안내문 없이 번호를 매긴 목록만 출력하세요 (예: \"1. ...\\n2. ...\"). 찾지 못하면 \"없음\"이라고만 답하세요.";
+        try{
+          const items=await claudeSearchOneCategory(prompt);
+          if(items.length>0) items.forEach(it=>flat.push(`[${c.label}] `+it));
+          else emptyCats.push(c.label);
+        }catch(e){
+          console.error(c.label+" 검색 오류:", e);
+          emptyCats.push(c.label);
         }
-      }else{
+      }
+      if(flat.length>0){
+        const existing=data.conclusion?.refs||[];
+        const merged=[...existing,...flat.filter(r=>!existing.includes(r))];
+        set(p=>({...p,conclusion:{...p.conclusion,refs:merged}}));
+      }
+      if(flat.length===0){
         alert("참고문헌을 찾지 못했습니다. 주제를 더 구체화하거나 직접 추가해주세요.");
+      }else if(emptyCats.length>0){
+        alert(`${flat.length}건을 찾았습니다. 다만 ${emptyCats.join(", ")} 유형은 찾지 못했습니다.`);
       }
     }catch(e){
       console.error("참고문헌 검색 오류:", e);
       alert("참고문헌 검색 오류: "+e.message);
     }
-    setRefLoading(false);
+    setRefProgress(""); setRefLoading(false);
   };
+
+  useEffect(()=>{
+    if(autoRun && !data._refAutoSearched && refTotal>0 && data.selectedTopic){
+      set(p=>({...p,_refAutoSearched:true}));
+      searchReferences();
+    }
+    // eslint-disable-next-line
+  },[autoRun]);
 
   return <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--r2)",padding:"14px 16px",marginBottom:10}}>
     <div style={{fontSize:12,color:"var(--text2)",marginBottom:10,fontWeight:600}}>🔍 AI 참고문헌 검색 — 유형별 개수 지정</div>
@@ -606,11 +633,31 @@ function ReferenceSearchBox({data,set}){
         {refLoading?"검색 중...":`🔍 검색 실행${refTotal>0?` (${refTotal}개)`:""}`}
       </button>
     </div>
-    {refLoading&&<AILoad msg="웹에서 참고문헌을 검색하는 중..."/>}
+    {refLoading&&<AILoad msg={refProgress||"웹에서 참고문헌을 검색하는 중..."}/>}
     <div style={{fontSize:11,color:"var(--text3)",marginTop:10,lineHeight:1.6}}>
       AI가 찾아준 자료도 <strong style={{color:"var(--warn)"}}>반드시 링크에 직접 들어가 내용을 확인</strong>한 뒤 사용하세요.
     </div>
   </div>;
+}
+
+// ─── 글쓰기 수준(학년) 및 기본 종결어미 규칙 — 서론/본론/결론/자기평가서 공용 ──────
+const WRITING_LEVELS=["중1","중2","중3","고1","고2","고3"];
+const WRITING_LEVEL_DESC={
+  "중1":"중학교 1학년이 이해할 수 있는 매우 쉬운 단어와 짧고 명확한 문장 위주로 작성. 어려운 개념·전문용어는 반드시 쉬운 말로 풀어서 설명할 것.",
+  "중2":"중학교 2학년 수준의 쉬운 단어와 짧은~중간 길이 문장. 어려운 개념은 예시를 들어 설명할 것.",
+  "중3":"중학교 3학년 수준의 표준적인 어휘와 문장 구조. 기본적인 전문용어는 간단한 정의와 함께 사용할 것.",
+  "고1":"고등학교 1학년 수준의 어휘와 논리적인 문장 구조. 전공 관련 기초 용어 사용 가능.",
+  "고2":"고등학교 2학년 수준의 심화된 어휘와 복문 구조. 관련 분야 전문용어를 적절히 활용할 것.",
+  "고3":"고등학교 3학년~대학 초년 수준에 근접한 학술적 어휘와 복잡한 논증 구조. 전문용어를 정확하고 능숙하게 활용할 것.",
+};
+function writingLevelInstr(data){
+  return data.writingLevel&&WRITING_LEVEL_DESC[data.writingLevel]
+    ? "\n글쓰기 수준 지시: "+WRITING_LEVEL_DESC[data.writingLevel] : "";
+}
+// 기본 문장 종결: 보고서체(개조식/평서형). '반말체'가 이미 다른 종결 규칙을 지정하므로 그때는 제외.
+const BASE_ENDING_RULE="\n문장 종결 규칙: 특별히 다른 말투가 지정되지 않는 한, 문장은 반드시 '~다.', '~이다.', '~음.', '~임.' 같은 보고서·서술형(개조식/평서형) 종결어미로 끝낼 것. '~습니다', '~해요', '~합니다' 같은 높임말체는 사용하지 말 것.";
+function writingEndingInstr(data){
+  return data.preferredStyle==="informal" ? "" : BASE_ENDING_RULE;
 }
 
 // ─── Save/Load Modal ──────────────────────────────────────────────────────
@@ -783,34 +830,20 @@ function Page2({data,set,onPrev,onNext}){
     <div className="divider"/>
     <div className="sec-label">말투 스타일 선택 (선택사항)</div>
     <div className="info-box" style={{marginBottom:10}}>
-      ✏️ 원하는 말투 스타일을 선택하면 <strong>서론·본론·결론 AI 작성 시 자동 반영</strong>됩니다. '말투 변환' 단계에서도 동일하게 적용됩니다.
+      📚 학생의 학년에 맞춰 어휘·문장 난이도를 조절합니다. 선택하지 않으면 고등학생 평균 수준으로 작성됩니다.<br/>
+      기본적으로 보고서에서 쓰는 <strong>'~다.', '~이다.', '~임.'</strong> 같은 서술형 종결어미로 문장이 끝나도록 작성됩니다.
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:8}}>
-      {[
-        {key:"natural",  label:"자연스러운 학생 글체",  desc:"AI가 쓴 것 같지 않은 자연스러운 고등학생 문체"},
-        {key:"formal",   label:"고1 수준",               desc:"고등학교 1학년 수준의 어휘와 문장"},
-        {key:"middle",   label:"중학생 수준",             desc:"중학생이 이해할 수 있는 쉬운 단어와 문장"},
-        {key:"simple",   label:"어려운 단어 최소화",      desc:"전문용어를 줄이고 쉽게 풀어서 표현"},
-        {key:"informal", label:"반말체",                  desc:"친근한 반말 형식으로 작성 (발표용)"},
-        {key:"academic", label:"논문체",                  desc:"격식 있는 학술 논문 스타일의 문어체"},
-      ].map(s=>(
-        <div key={s.key} onClick={()=>set(p=>({...p,preferredStyle:data.preferredStyle===s.key?"":s.key}))}
-          style={{background:"var(--surface)",border:`2px solid ${data.preferredStyle===s.key?"var(--accent)":"var(--border)"}`,
-            borderRadius:"var(--r2)",padding:"12px 14px",cursor:"pointer",transition:"all .18s",
-            boxShadow:data.preferredStyle===s.key?"0 0 8px var(--accent-glow)":"none"}}>
-          <div style={{fontSize:13,fontWeight:600,color:data.preferredStyle===s.key?"var(--accent)":"var(--text)",marginBottom:3}}>{s.label}</div>
-          <div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5}}>{s.desc}</div>
-        </div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+      {WRITING_LEVELS.map(lv=>(
+        <button key={lv} className={"vol-btn "+(data.writingLevel===lv?"sel":"")}
+          onClick={()=>set(p=>({...p,writingLevel:data.writingLevel===lv?"":lv}))}>
+          {lv}
+        </button>
       ))}
     </div>
-    {data.preferredStyle&&(
+    {data.writingLevel&&(
       <div style={{fontSize:11,color:"var(--success)",marginBottom:8}}>
-        ✓ 선택됨: {[
-          {key:"natural",label:"자연스러운 학생 글체"},{key:"formal",label:"고1 수준"},
-          {key:"middle",label:"중학생 수준"},{key:"simple",label:"어려운 단어 최소화"},
-          {key:"informal",label:"반말체"},{key:"academic",label:"논문체"},
-        ].find(s=>s.key===data.preferredStyle)?.label}
-        <span style={{color:"var(--text3)",marginLeft:8}}>— 말투 변환 단계에서 자동 선택됩니다.</span>
+        ✓ 선택됨: <strong>{data.writingLevel}</strong> 수준 — 서론·본론·결론·자기평가서 AI 작성 시 자동 반영됩니다.
       </div>
     )}
 
@@ -1030,6 +1063,17 @@ function Page3({data,set,onPrev,onNext}){
       </div>
     ))}
 
+    {filledCount===count&&count>0&&(
+      <>
+        <div className="divider"/>
+        <div className="sec-label" style={{marginBottom:10}}>참고문헌 미리 찾아두기</div>
+        <div className="info-box" style={{marginBottom:10}}>
+          ✅ 소주제가 모두 정해져서 관련 참고문헌을 자동으로 검색합니다 (기본: 국내 기사 5개·국내 논문 1개). 개수를 바꿔서 다시 검색할 수도 있습니다.
+        </div>
+        <ReferenceSearchBox data={data} set={set} autoRun={true}/>
+      </>
+    )}
+
     <NavRow page={3} onPrev={onPrev} onNext={onNext} nextDisabled={filledCount<count}/>
   </div>;
 }
@@ -1246,6 +1290,19 @@ function Page6({data,set,onPrev,onNext}){
       <button className={`style-btn ${data.bodyStyle==="prose"?"sel":""}`} onClick={()=>set(p=>({...p,bodyStyle:"prose"}))}>📝 서술형</button>
       <button className={`style-btn ${data.bodyStyle==="outline"?"sel":""}`} onClick={()=>set(p=>({...p,bodyStyle:"outline"}))}>📋 소주제 분류형</button>
     </div>
+    <div className="fg" style={{marginTop:10}}>
+      <label>소주제 1개당 목표 글자수 (선택사항)</label>
+      <input type="number" min={200} max={2000} step={50}
+        placeholder="비워두면 기본값 500~700자 사용"
+        value={data.bodyCharTarget||""}
+        onChange={e=>{
+          const v=e.target.value;
+          set(p=>({...p,bodyCharTarget:v?Math.max(200,Math.min(2000,parseInt(v)||0)):null}));
+        }}/>
+      <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>
+        본론의 각 소주제 내용이 이 글자수에 맞춰 작성됩니다. 비워두면 기본값(500~700자)이 사용됩니다.
+      </div>
+    </div>
     <div className="divider"/>
     <div className="sec-label">분량 선택</div>
     <div className="vol-opts">
@@ -1268,8 +1325,9 @@ function Page7({data,set,onPrev,onNext}){
     informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
     academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
   };
-  const styleInstruction=data.preferredStyle&&STYLE_DESC_MAP[data.preferredStyle]
-    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${STYLE_DESC_MAP[data.preferredStyle]}`:"";
+  const styleInstruction=(data.preferredStyle&&STYLE_DESC_MAP[data.preferredStyle]
+    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${STYLE_DESC_MAP[data.preferredStyle]}`:"")
+    +writingLevelInstr(data)+writingEndingInstr(data);
 
   const gen=async(target)=>{
     setLoading(true); setWhich(target);
@@ -1407,14 +1465,16 @@ function Page8({data,set,onPrev,onNext}){
     informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
     academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
   };
-  const bodyStyleInstruction=data.preferredStyle&&BODY_STYLE_DESC[data.preferredStyle]
-    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${BODY_STYLE_DESC[data.preferredStyle]}`:"";
+  const bodyStyleInstruction=(data.preferredStyle&&BODY_STYLE_DESC[data.preferredStyle]
+    ?`\n문체 지시: 반드시 다음 스타일로 작성할 것 → ${BODY_STYLE_DESC[data.preferredStyle]}`:"")
+    +writingLevelInstr(data)+writingEndingInstr(data);
 
   const genOne=async(i)=>{
     setLoadingIdx(i);
     try{
       const q=data.questions[i];
       const style=data.bodyStyle==="outline"?"소주제를 3~4개로 나누어 각 소주제별로 내용을 서술하는 형식":"단락 구분 없이 서술형으로 작성";
+      const charTarget=data.bodyCharTarget?`${data.bodyCharTarget}자 내외 (±10% 범위 안에서 반드시 이 분량에 맞출 것)`:"500~700자";
       const r=await geminiJSON(
 `고등학생 탐구보고서 본론 작성.
 주제: ${data.selectedTopic}
@@ -1422,7 +1482,7 @@ function Page8({data,set,onPrev,onNext}){
 질문 이유: ${q.reason}
 학년: ${data.grade} / 분량목표: ${data.pageCount}페이지
 서술방식: ${style}
-분량: 500~700자
+분량: ${charTarget}
 요구사항: 정확한 사실과 근거, 논리적 흐름, 고등학생 수준 용어${bodyStyleInstruction}
 ${data.bodyStyle==="outline"?"- 각 소주제는 '■ 소주제명' 형식으로 시작":""}
 JSON: {"content":"본론 내용"}`);
@@ -1568,7 +1628,7 @@ JSON: {"content":"본론 내용"}`);
           {loadingIdx===i&&<AILoad msg={`본론 ${i+1} 작성 중...`}/>}
 
           {/* 텍스트 */}
-          <textarea rows={8} placeholder={`"${q.text}"에 대한 탐구 내용 (500~700자 권장)`}
+          <textarea rows={8} placeholder={`"${q.text}"에 대한 탐구 내용 (${data.bodyCharTarget?data.bodyCharTarget+"자 내외":"500~700자"} 권장)`}
             value={data.body?.[`q${i}`]||""}
             onChange={e=>set(p=>({...p,body:{...p.body,[`q${i}`]:e.target.value}}))}/>
           <CharCount text={data.body?.[`q${i}`]||""} min={500} max={700}/>
@@ -1629,8 +1689,9 @@ function Page9({data,set,onPrev,onNext}){
         informal:"반말체로 자연스럽게. '~했어', '~이야', '~하더라' 형식.",
         academic:"학술 논문체. '~하였다', '~됨을 알 수 있다', '~에 따르면' 등 격식체.",
       };
-      const concStyleInstr=data.preferredStyle&&CONC_STYLE_DESC[data.preferredStyle]
-        ?"\n문체 지시: 반드시 다음 스타일로 작성할 것 → "+CONC_STYLE_DESC[data.preferredStyle]:"";
+      const concStyleInstr=(data.preferredStyle&&CONC_STYLE_DESC[data.preferredStyle]
+        ?"\n문체 지시: 반드시 다음 스타일로 작성할 것 → "+CONC_STYLE_DESC[data.preferredStyle]:"")
+        +writingLevelInstr(data)+writingEndingInstr(data);
 
       const prompt=
         "고등학생 탐구보고서 결론 작성.\n"+
@@ -2419,7 +2480,7 @@ function Page12({data,set,onPrev,onNext}){
 - 강화된 역량: 120자 내외 (탐구를 통해 키운 구체적 역량)
 - 새롭게 알게 된 점: 150자 내외 (탐구를 통해 새롭게 알게 된 내용)
 - 추후 탐구: 100자 내외 (앞으로 더 탐구하고 싶은 방향)
-
+${writingLevelInstr(data)}${writingEndingInstr(data)}
 JSON: {"motivation":"내용","process":"내용","skills":"내용","learned":"내용","future":"내용"}`);
       if(r) set(p=>({...p,selfEval:{...p.selfEval,...r}}));
     }catch(e){}
